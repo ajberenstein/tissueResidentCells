@@ -1,0 +1,278 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+renv::activate()
+renv::restore()
+
+library(Seurat)
+library(dplyr)
+library(UCell)
+library(scGate)
+library(ggplot2)
+library(patchwork)
+library(SeuratDisk)
+library(ProjecTILs)
+source("./utils.R")
+```
+# TO DO ##########
+# Prefiltrar células acorde a SCGATE PURE
+# CALCULAR 20 O 50 TOP VARIABLE FEATURES EN BCELLS DEL DATASET MOUSE ORIGINAL (Y TOMAR LOS QUE TAMBIÉN ESTÉN EN Human)
+# Luego usarlos para calcular los anchors de integración. 
+# VER SI DA MÁS CONSISTENTE EL ANÁLISIS. 
+
+
+```{r}
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+data <- readRDS(panBellFile)
+data%>%dim
+data <- data%>%subset(panBcell2HR == "Pure")
+data%>%dim
+```
+
+# Load Refernce
+```{r}
+download = F
+if(download){
+  options(timeout=3600)
+  download.file("https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat",destfile = "../data/pbmc_multimodal.h5seurat")
+}else{
+  reference <- LoadH5Seurat("~/Dropbox/Amezcua/data/pbmc_multimodal.h5seurat")
+}
+
+```
+
+
+```{r}
+DimPlot(object = reference, reduction = "wnn.umap", group.by = "celltype.l2", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+```
+
+# mapping mouse to human genes
+```{r}
+## Mapp via Ensemble
+if(F){
+  human.mapped.genes <- convertMouseGeneList(data%>%rownames)
+  
+  # Filter those genes that do not appear in our reference
+  human.mapped.genes <- human.mapped.genes%>%subset(HGNC.symbol%in%(reference%>%rownames())) 
+  
+  # make HGNC.symbol unique
+  human.mapped.genes <- human.mapped.genes%>%distinct(.,HGNC.symbol,.keep_all = T) 
+  
+  # make MGI.symbol unique
+  human.mapped.genes <- human.mapped.genes%>%distinct(.,MGI.symbol,.keep_all = T) 
+}else{
+  translate <- ProjecTILs::Hs2Mm.convert.table
+  mouse.genes <- data%>%rownames() 
+  ii <- match(mouse.genes,translate$Gene.MM)
+  human.mapped.genes <- translate[ii[!is.na(ii)],c("Gene.HS","Gene.MM")]
+  colnames(human.mapped.genes) <- c("HGNC.symbol","MGI.symbol")
+  
+}
+
+data.filtered <- data%>%subset(features =  human.mapped.genes$MGI.symbol)
+renamed.counts <- data.filtered@assays$RNA@counts
+ii <- match(renamed.counts%>%rownames(),human.mapped.genes$MGI.symbol)
+rownames(renamed.counts) <- human.mapped.genes[ii,]$HGNC.symbol 
+
+# create new seurat object 
+data.human.genes <- CreateSeuratObject(counts = renamed.counts,meta.data = data.filtered@meta.data)
+
+```
+
+```{r}
+
+
+```
+
+
+```{r}
+data.human.genes <- SCTransform(data.human.genes, verbose = FALSE)
+#DefaultAssay(data.human.genes) <- "RNA"
+#data.human.genes <- process_obj(obj = data.human.genes, ndim = 20, nfeat = 500, find_variable_features = T)
+DefaultAssay(data.human.genes) <- "SCT"
+```
+
+
+
+```{r}
+obj <- data.human.genes
+obj <- NormalizeData(obj, verbose = TRUE)
+obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 50 , verbose = FALSE)
+HVGs_query <- obj@assays$SCT@var.features
+HVGs_query
+
+```
+
+#Limit reference
+```{r,fig.width= 9, fig.height=4 }
+ref <- reference%>%subset(celltype.l1 == "B")
+DimPlot(object = ref, reduction = "wnn.umap", group.by = "celltype.l2", label = TRUE, label.size = 3, repel = TRUE) + NoLegend() + 
+  
+DimPlot(object = ref, reduction = "wnn.umap", group.by = "celltype.l3", label = TRUE, label.size = 3, repel = TRUE) 
+
+
+```
+
+```{r}
+obj.ref <- FindVariableFeatures(ref, selection.method = "vst", nfeatures = 5000 , verbose = FALSE,assay = "SCT")
+HVGs_ref <- obj.ref@assays$SCT@var.features
+HVGs_ref%>%head(20)
+```
+
+
+```{r}
+intersect(HVGs_ref,HVGs_query)
+intersect(HVGs_ref,data.human.genes%>%rownames)%>%length()
+```
+
+```{r}
+length(intersect(reference@assays$SCT@var.features, HVGs_ref))
+```
+
+
+Find Anchors
+```{r}
+anchors <- FindTransferAnchors(
+  reference = ref,
+  query = data.human.genes,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50,
+  features = intersect(HVGs_ref,data.human.genes%>%rownames)
+)
+```
+
+
+Mapping
+```{r}
+mapped.data <- MapQuery(
+  anchorset = anchors,
+  query = data.human.genes,
+  reference = ref,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    celltype.l3 = "celltype.l3",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+# Explore results
+```{r,fig.width= 15,fig.height=5}
+p1 = DimPlot(mapped.data, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(mapped.data, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+p3 = DimPlot(mapped.data, reduction = "ref.umap", group.by = "predicted.celltype.l3", label = TRUE, label.size = 3 ,repel = TRUE) 
+
+p1 + p2 +p3
+```
+
+
+See some marker genes
+```{r,fig.width= 10,fig.height=4}
+tt <- table(mapped.data@meta.data$predicted.celltype.l2,mapped.data@meta.data$panBcell2HR)
+tt
+```
+
+
+```{r,fig.width= 10,fig.height=4}
+FeaturePlot(mapped.data, features = c("B naive", "B intermediate", "B memory"),  reduction = "ref.umap", cols = c("lightgrey", "darkred"), ncol = 3) & theme(plot.title = element_text(size = 10))
+
+FeaturePlot(pures, features = c("B naive", "B intermediate", "B memory"),  reduction = "ref.umap", cols = c("lightgrey", "darkred"), ncol = 3) & theme(plot.title = element_text(size = 10))
+
+```
+
+
+## Define a final working dataset
+```{r}
+low_res = c("B")
+medium_res = c("B naive", "B intermediate", "B memory", "Plasmablast")
+high_res <- c("B intermediate kappa", "B intermediate lambda","B memory kappa","B memory lambda","B naive kappa", "B naive lambda", "Plasma","Plasmablast")
+
+# Filter
+mapped.data.filtered <- mapped.data %>% subset(.,predicted.celltype.l1 %in% low_res &
+                                                 predicted.celltype.l2 %in% medium_res &
+                                                 predicted.celltype.l3 %in% high_res & 
+                                                 panBcell2HR =="Pure"
+)
+mapped.data%>%dim
+mapped.data.filtered%>%dim
+
+```
+
+
+# Visualize filtered data
+```{r,fig.width=8,fig.height=4}
+p4 <- DimPlot(mapped.data.filtered, reduction = "ref.umap", group.by = "predicted.celltype.l3", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+p5 <- FeaturePlot(mapped.data.filtered, reduction = "ref.umap", features = "predicted.celltype.l1.score", label = TRUE, label.size = 3 ,repel = TRUE) 
+p4 + p5
+```
+
+
+```{r}
+mapped.data.filtered$predicted.celltype.l1.score%>%hist()
+```
+
+
+```{r}
+quantile(mapped.data.filtered$predicted.celltype.l1.score,c(0.01,0.03,0.05))
+q01 <- quantile(mapped.data.filtered$predicted.celltype.l1.score,0.01)
+q03 <- quantile(mapped.data.filtered$predicted.celltype.l1.score,0.03)
+q05 <- quantile(mapped.data.filtered$predicted.celltype.l1.score,0.05)
+
+mapped.data.filtered<- mapped.data.filtered%>%subset(predicted.celltype.l1.score >q05)
+p6 <-DimPlot(mapped.data.filtered, reduction = "ref.umap", group.by  = "predicted.celltype.l3", label = TRUE, label.size = 3 ,repel = TRUE) 
+p6
+```
+
+How many cells mapped to each state?
+```{r}
+mapped.data.filtered$predicted.celltype.l3%>%table
+```
+
+# Transfer learned celltypes to the mouse original data
+```{r}
+cells.ok <- colnames(data)%in% colnames(mapped.data.filtered)
+mouse.data.mapped <- data%>%subset(cells = intersect(colnames(data),colnames(mapped.data.filtered)))
+
+mouse.data.mapped <- AddMetaData(mouse.data.mapped, metadata = mapped.data.filtered@meta.data$predicted.celltype.l1, col.name = "predicted.celltype.l1")
+
+mouse.data.mapped <- AddMetaData(mouse.data.mapped, metadata = mapped.data.filtered@meta.data$predicted.celltype.l1.score, col.name = "predicted.celltype.l1.score")
+
+
+mouse.data.mapped <- AddMetaData(mouse.data.mapped, metadata = mapped.data.filtered@meta.data$predicted.celltype.l2, col.name = "predicted.celltype.l2")
+mouse.data.mapped <- AddMetaData(mouse.data.mapped, metadata = mapped.data.filtered@meta.data$predicted.celltype.l2.score, col.name = "predicted.celltype.l2.score")
+
+
+mouse.data.mapped <- AddMetaData(mouse.data.mapped, metadata = mapped.data.filtered@meta.data$predicted.celltype.l3, col.name = "predicted.celltype.l3")
+mouse.data.mapped <- AddMetaData(mouse.data.mapped, metadata = mapped.data.filtered@meta.data$predicted.celltype.l3.score, col.name = "predicted.celltype.l3.score")
+
+```
+
+
+## We can explore some markers among defined celltypes
+
+```{r}
+#mouse.data.mapped%>%dim
+mouse.data.mapped%>%rownames()%>%grep("^Igl",.,value = T)
+
+```
+
+```{r}
+
+VlnPlot(mouse.data.mapped, features = c("Ighm", "Ighg1", "Igha","Cd19","Ms4a1","Cd38","Cd69","Cd93","Sdc1","Itgal","Igkc","Iglc2"), group.by = "predicted.celltype.l3", stack = T) + NoLegend()
+
+
+mouse.data.mapped$predicted.celltype.l3%>%table(exclude = F)
+```
+```{r}
+p7 <-DimPlot(mouse.data.mapped, reduction = "umap", group.by  = "predicted.celltype.l3", label = TRUE, label.size = 3 ,repel = TRUE) 
+p7
+```
+
