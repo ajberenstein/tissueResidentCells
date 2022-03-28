@@ -1,0 +1,26 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+renv::activate()
+renv::restore()
+install.packages("Seurat")
+install.packages("remotes")
+remotes::install_github("carmonalab/UCell")
+remotes::install_github("carmonalab/scGate")
+install.packages("BiocManager")
+BiocManager::install("SingleR")
+BiocManager::install("celldex")
+BiocManager::install("ontoProc")
+BiocManager::install("rmarkdown")
+remotes::install_github("mojaveazure/seurat-disk")
+remotes::install_github("carmonalab/ProjecTILs")
+BiocManager::install("glmGamPoi")
+BiocManager::install("devtools")
+BiocManager::install("biomaRt")
+devtools::install_github('satijalab/seurat-data')
+
+```
+
