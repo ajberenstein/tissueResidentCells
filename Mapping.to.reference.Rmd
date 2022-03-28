@@ -20,7 +20,7 @@ source("./utils.R")
 ```
 
 ```{r}
-panBellFile <-  "../processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
 data <- readRDS(panBellFile)
 ```
 
@@ -32,7 +32,7 @@ if(download){
   options(timeout=3600)
   download.file("https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat",destfile = "../data/pbmc_multimodal.h5seurat")
 }else{
-  reference <- LoadH5Seurat("../data/pbmc_multimodal.h5seurat")
+  reference <- LoadH5Seurat("~/Dropbox/Amezcua/data/pbmc_multimodal.h5seurat")
 }
 DimPlot(object = reference, reduction = "wnn.umap", group.by = "celltype.l2", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
 
@@ -41,26 +41,33 @@ DimPlot(object = reference, reduction = "wnn.umap", group.by = "celltype.l2", la
 # mapping mouse to human genes
 ```{r}
 ## Mapp via Ensemble
-human.mapped.genes <- convertMouseGeneList(data%>%rownames)
-
-# Filter those genes that do not appear in our reference
-human.mapped.genes <- human.mapped.genes%>%subset(HGNC.symbol%in%(reference%>%rownames())) 
-
-# make HGNC.symbol unique
-human.mapped.genes <- human.mapped.genes%>%distinct(.,HGNC.symbol,.keep_all = T) 
-
-# make MGI.symbol unique
-human.mapped.genes <- human.mapped.genes%>%distinct(.,MGI.symbol,.keep_all = T) 
+if(F){
+  human.mapped.genes <- convertMouseGeneList(data%>%rownames)
+  
+  # Filter those genes that do not appear in our reference
+  human.mapped.genes <- human.mapped.genes%>%subset(HGNC.symbol%in%(reference%>%rownames())) 
+  
+  # make HGNC.symbol unique
+  human.mapped.genes <- human.mapped.genes%>%distinct(.,HGNC.symbol,.keep_all = T) 
+  
+  # make MGI.symbol unique
+  human.mapped.genes <- human.mapped.genes%>%distinct(.,MGI.symbol,.keep_all = T) 
+}else{
+  translate <- ProjecTILs::Hs2Mm.convert.table
+  mouse.genes <- data%>%rownames() 
+  ii <- match(mouse.genes,translate$Gene.MM)
+  human.mapped.genes <- translate[ii[!is.na(ii)],c("Gene.HS","Gene.MM")]
+  colnames(human.mapped.genes) <- c("HGNC.symbol","MGI.symbol")
+  
+}
 
 data.filtered <- data%>%subset(features =  human.mapped.genes$MGI.symbol)
-#ccounts <- 
 renamed.counts <- data.filtered@assays$RNA@counts
 ii <- match(renamed.counts%>%rownames(),human.mapped.genes$MGI.symbol)
 rownames(renamed.counts) <- human.mapped.genes[ii,]$HGNC.symbol 
 
 # create new seurat object 
 data.human.genes <- CreateSeuratObject(counts = renamed.counts,meta.data = data.filtered@meta.data)
-
 ```
 
 
