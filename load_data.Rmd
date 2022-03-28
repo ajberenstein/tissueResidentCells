@@ -1,0 +1,469 @@
+# This notebook will work on data produced by Amezcua et al. (Cell 2019)
+In that work, Amezcua analyzed tissue resident Th cells. 
+Now, the idea is to recycle those data but redirecting the focus on Bcells. In particular, those tissue resident ones. 
+
+
+```{r}
+renv::activate()
+renv::restore()
+#install.packages("Seurat")
+#install.packages("remotes")
+#remotes::install_github("carmonalab/UCell")
+#remotes::install_github("carmonalab/scGate")
+#install.packages("BiocManager")
+#BiocManager::install("SingleR")
+#BiocManager::install("celldex")
+#BiocManager::install("ontoProc")
+#BiocManager::install("rmarkdown")
+
+library("Seurat")
+library("dplyr")
+library("UCell")
+library("scGate")
+library("SingleR")
+library("ggplot2")
+source("./utils.R")
+
+```
+
+# Load datasets from counts
+```{r}
+path <- c("~/Dropbox/Amezcua/data/")
+samples <- c("DS-017-WT","DS-017-Im1","DS-017-Im2")
+count_files <- paste(path,samples,"gene_exon_tagged_dge.txt.gz",sep = "/")
+
+# Output files:
+processed_annotated_file <- "~/Dropbox/Amezcua/processed_data/seurat.merged.processed.rds"
+bcells.file <- "../processed_data/testing.bcells.rds"   # Similar to processed annotated file but containing some scGate bcell maker annotations
+panBellFile <-  "../processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+```
+
+## Load proccessed object
+```{r}
+if(file.exists(processed_annotated_file)){
+  run =F
+  seurat.merged.processed <- readRDS(processed_annotated_file)  
+}else{
+  run =T
+}
+
+```
+
+
+#create Seurat objects
+```{r}
+if(run){
+  seuratDataList <- list()
+  for(i in seq_along(samples)){
+    countdata <- read.table(
+      file = count_files[i],
+      header = T,
+      row.names = 1
+    )
+      
+    obj <- Seurat::CreateSeuratObject(counts = countdata,project = samples[i])
+    seuratDataList[[i]] <- obj
+  }
+  ncell <- table(unlist(sapply(seuratDataList,colnames)))
+  to.drop <- names(ncell[ncell>1])
+  
+  # remove 4 barcodes duplicated across samples
+  seuratDataList = lapply(seuratDataList,function(x){
+    res = subset(x,cells = setdiff(colnames(x),to.drop) )
+    return(res)
+  })
+}
+```
+
+
+# quality filtering
+```{r,fig.height= 8,fig.width= 13}
+if(run){
+  seurat.merged <- Reduce(merge, seuratDataList)
+  seurat.merged@meta.data%>%head()
+  
+  percent.ribo.dv <- PercentageFeatureSet(seurat.merged, pattern = "^Rp[ls]")
+  percent.mito.dv <- PercentageFeatureSet(seurat.merged, pattern = "^mt-")
+  
+  seurat.merged <- AddMetaData(seurat.merged, metadata = percent.ribo.dv, col.name = "percent.ribo")
+  seurat.merged <- AddMetaData(seurat.merged, metadata = percent.mito.dv, col.name = "percent.mito")
+}  
+Seurat::VlnPlot(seurat.merged,features = c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),group.by = "orig.ident",ncol = 2)
+```
+
+# Filter low or high expressed cells 
+```{r}
+if(run){
+  splited.by.sample <- SplitObject(seurat.merged, split.by = "orig.ident")
+  
+  splited.by.sample.qc <- lapply(splited.by.sample, function(x) {
+     #n UMIs
+     q <- quantile(x@meta.data$nCount_RNA, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99))
+     x <- subset(x, subset=nCount_RNA>max(q["10%"]) & nCount_RNA<q['99%']) 
+     
+     #n genes
+     q <- quantile(x@meta.data$nFeature_RNA, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99))
+     x <- subset(x, subset=nFeature_RNA>max(q['10%']) & nFeature_RNA < q['99%'])
+     
+     #% ribo
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+     x <- subset(x, subset=percent.ribo>q['1%'] & percent.ribo < min(50,q['99%']) )
+     
+     #% mito
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+     x <- subset(x, subset=percent.mito < q['99%'])
+     return(x)
+  })
+  
+  seurat.filtered.merged <- Reduce(merge, splited.by.sample.qc)
+  dim(seurat.merged)
+  dim(seurat.filtered.merged)
+}else{
+  seurat.filtered.merged <- seurat.merged.processed
+}
+
+sapply(c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),function(x){summary(seurat.filtered.merged[[x]])})
+
+```
+
+## Control step: how many cells were dropped by high expression values? (Re: 262 cells)
+```{r}
+if(run){
+  high.expr.dropped <- lapply(splited.by.sample, function(x){
+     q <- quantile(x@meta.data$nCount_RNA, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99))
+     x_ncount <- subset(x, nCount_RNA>q['99%']) 
+     
+     #n genes
+     q <- quantile(x@meta.data$nFeature_RNA, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99))
+     x_nfeature <- subset(x, subset= nFeature_RNA > q['99%'])
+     
+     #% ribo
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99),na.rm =T)
+     x_ribo <- subset(x, subset=percent.ribo > min(50,q['99%']))
+     
+     #% mito
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99),na.rm =T)
+     x_mito <- subset(x, subset=percent.mito > q['99%'])
+     
+     return(table(c(x_ncount%>%colnames(), x_nfeature%>%colnames(),x_ribo%>%colnames(),x_ribo%>%colnames())))
+    }
+  )
+  
+  # 262 cells dropped by staying over the top 1% quantile in any of control quantity
+  cells.dropped.by.hihg.quantile <- unlist(high.expr.dropped)
+  cells.dropped.by.hihg.quantile%>%length()
+}
+```
+
+
+## Sanity check: visual detection of possible bach effects (Re: thats ok)
+```{r,fig.height= 4.5,fig.width= 12}
+ndim = 20      # for pca
+nfeat = 1000    # number of most variable features to be considered
+
+# scale data; find variable features, run pca and run umap
+
+if(run) seurat.merged.processed <- process_obj(seurat.filtered.merged,ndim = ndim, nfeat = nfeat, find_variable_features = T) 
+DimPlot(seurat.merged.processed,,split.by = "orig.ident")
+```
+
+# 7980 cells
+# 18.886 features 
+```{r}
+seurat.merged.processed
+```
+
+## run singleR
+```{r}
+if(run){
+  ref.se <- celldex::ImmGenData()
+  param <- BiocParallel::MulticoreParam(workers = 32)
+  
+  ## broad 
+  result.singler.main = SingleR(test = GetAssayData(seurat.merged.processed), ref = ref.se, labels = ref.se$label.main, BPPARAM=param)
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = result.singler.main$pruned.labels,col.name = "SingleR.main")
+  
+  # finer (ontology based)
+  result.singler = SingleR(test = GetAssayData(seurat.merged.processed), ref = ref.se,labels = ref.se$label.ont, BPPARAM=param)
+  # get term names
+  cl <- ontoProc::getCellOnto()
+  terms <- result.singler$pruned.labels%>%unique()
+  getTerms <- ontoProc::label_TAG(ontology = cl,terms)
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = result.singler$pruned.labels,col.name = "SingleR.tag")
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = unname(getTerms[result.singler$pruned.labels]),col.name = "SingleR.term")
+}
+
+```
+
+# visualize SingleR classification
+
+## TO DO, reahacer cluster por ontologia sólo en Bcells y Plasma Cells. 
+```{r,fig.height= 8,fig.width= 30}
+#DimPlot(seurat.merged.processed,group.by = "SingleR.main") +  
+
+(DimPlot(seurat.merged.processed,group.by = "SingleR.term")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+
+```
+
+
+## explore some key markers
+```{r}
+models <- scGate::get_scGateDB()
+scg.immune <- scGate::gating_model(name = "immune", signature = "Ptprc")
+panBcell <- scGate::gating_model(name = "panBcell", signature = "Cd79a")
+```
+
+Run
+```{r}
+if(run){
+  seurat.merged.processed <- scGate(data = seurat.merged.processed, model = scg.immune, output.col.name = "immune")
+  seurat.merged.processed <- scGate(data = seurat.merged.processed, model = models$mouse$generic$Myeloid, output.col.name = "myeloid")
+  seurat.merged.processed <- scGate(data = seurat.merged.processed, model = models$mouse$generic$Tcell, output.col.name = "Tcell")
+  seurat.merged.processed <- scGate(data = seurat.merged.processed, model = panBcell, output.col.name = "PanBcell")
+}
+```
+
+
+```{r}
+DimPlot(seurat.merged.processed, cols = c(list(Impure = "gray", Pure = "green")), group.by = "immune" ) + theme(aspect.ratio = 1) + ggtitle("scGate Immune")
+DimPlot(seurat.merged.processed, cols = c(list(Impure = "gray", Pure = "green")), group.by = "myeloid" ) + theme(aspect.ratio = 1) + ggtitle("scGate myeloid")
+DimPlot(seurat.merged.processed, cols = c(list(Impure = "gray", Pure = "green")), group.by = "Tcell" ) + theme(aspect.ratio = 1) + ggtitle("scGate Tcell")
+
+DimPlot(seurat.merged.processed, cols = c(list(Impure = "gray", Pure = "green")), group.by = "PanBcell" ) + theme(aspect.ratio = 1) + ggtitle("scGate panBcell")
+
+```
+
+## Clustering
+
+```{r}
+if(run){
+  set.seed(1234)
+  seurat.merged.processed <- FindNeighbors(seurat.merged.processed, dims = 1:20)
+  seurat.merged.processed <- FindClusters(seurat.merged.processed, resolution = 0.7)
+  saveRDS(seurat.merged.processed,file = processed_annotated_file)
+}
+```
+
+```{r}
+DimPlot(seurat.merged.processed,group.by = "seurat_clusters",label = T)
+
+```
+
+
+# Marker enrichment of clusters
+```{r}
+Idents(seurat.merged.processed) <- "seurat_clusters"
+find.all.markers <- FindAllMarkers(object = seurat.merged.processed, min.diff.pct = 0.5) #0.4
+to.review <- find.all.markers%>%subset(cluster %in% c(0,1,10,13,16,17,18))
+```
+
+```{r}
+aux <- find.all.markers%>%subset(cluster == 13)
+aux%>%rownames() %>%grep("S",., value = T)
+```
+
+# see immunoglobulines
+```{r,fig.height= 5,fig.width= 6}
+ighs <- data.frame() 
+ighs <- rbind( ighs, c("Igm","Ighm"))
+colnames(ighs) <- c("protein","gene")
+ighs <- rbind(ighs, c("Iga","Igha"))
+ighs <- rbind(ighs, c("Igd","Ighd1-1"))
+ighs <- rbind(ighs, c("Igg","Ighg1"))
+FeaturePlot(seurat.merged.processed,features = ighs$gene,pt.size = 0.25,ncol = 2)
+
+
+
+```
+
+
+
+
+```{r,fig.height= 8,fig.width= 12}
+markers <- data.frame()
+markers <- rbind(markers,c("Cd138","Sdc1"))
+colnames(markers) <- c("protein","gene")
+markers <- rbind(markers, c("Cd79a","Cd79a"))
+markers <- rbind(markers, c("Cd20","Ms4a1"))
+markers <- rbind(markers, c("Cd19","Cd19"))
+markers <- rbind(markers, c("Cd23","Fcer2a"))
+markers <- rbind(markers, c("Cd93","Cd93"))
+
+
+
+markers$gene %in% (seurat.merged.processed%>%rownames())
+#seurat.merged.processed%>%rownames()%>%grep('Cd8',.,value = T)
+FeaturePlot(seurat.merged.processed,features = markers$gene,pt.size = 0.5,ncol = 3) 
+
+```
+```{r}
+cd79 <- scGate::gating_model(name = "cd79", signature = "Cd79a")
+cd19 <- scGate::gating_model(name = "cd19", signature = "Cd19")
+cd20 <- scGate::gating_model(name = "cd20", signature = "Ms4a1")
+cd23 <- scGate::gating_model(name = "cd23", signature = "Fcer2a")
+cd93 <- scGate::gating_model(name = "cd93", signature = "Cd93")
+cd138 <- scGate::gating_model(name = "cd138", signature = "Sdc1")
+cd80 <- scGate::gating_model(name = "cd80", signature = "Cd80")
+cd86 <- scGate::gating_model(name = "cd86", signature = "Cd86")
+igg <- scGate::gating_model(name = "igg", signature = "Ighg1")
+igm <- scGate::gating_model(name = "igm", signature = "Ighm")
+iga <- scGate::gating_model(name = "iga", signature = "Igha")
+igd <- scGate::gating_model(name = "igd", signature = "Ighd1-1")
+```
+
+
+```{r}
+if(file.exists(bcells.file)){
+  run.bcell.markers <- F
+  testing.bcells <- readRDS(bcells.file)
+}else{
+  run.bcell.markers <- T
+  testing.bcells <- seurat.merged.processed
+
+}
+
+```
+
+```{r}
+## new scGate model
+cd79 <- scGate::gating_model(name = "cd79", signature = "Cd79a")
+cd19 <- scGate::gating_model(name = "cd19", signature = "Cd19")
+cd20 <- scGate::gating_model(name = "cd20", signature = "Ms4a1")
+cd23 <- scGate::gating_model(name = "cd23", signature = "Fcer2a")
+cd93 <- scGate::gating_model(name = "cd93", signature = "Cd93")
+cd138 <- scGate::gating_model(name = "cd138", signature = "Sdc1")
+cd80 <- scGate::gating_model(name = "cd80", signature = "Cd80")
+cd86 <- scGate::gating_model(name = "cd86", signature = "Cd86")
+igg <- scGate::gating_model(name = "igg", signature = "Ighg1")
+igm <- scGate::gating_model(name = "igm", signature = "Ighm")
+iga <- scGate::gating_model(name = "iga", signature = "Igha")
+igd <- scGate::gating_model(name = "igd", signature = "Ighd1-1")
+
+
+if(run.bcell.markers){
+  testing.bcells <- scGate(data = testing.bcells, model = cd79, output.col.name = "cd79")
+  testing.bcells <- scGate(data = testing.bcells, model = cd19, output.col.name = "cd19")
+  testing.bcells <- scGate(data = testing.bcells, model = cd20, output.col.name = "cd20")
+  testing.bcells <- scGate(data = testing.bcells, model = cd23, output.col.name = "Fcer2a")
+  testing.bcells <- scGate(data = testing.bcells, model = cd93, output.col.name = "cd93")
+  testing.bcells <- scGate(data = testing.bcells, model = cd138, output.col.name = "cd138")
+  testing.bcells <- scGate(data = testing.bcells, model = cd80, output.col.name = "cd80")
+  testing.bcells <- scGate(data = testing.bcells, model = cd86, output.col.name = "cd86")
+  testing.bcells <- scGate(data = testing.bcells, model = igm, output.col.name = "igm")
+  testing.bcells <- scGate(data = testing.bcells, model = igg, output.col.name = "igg")
+  testing.bcells <- scGate(data = testing.bcells, model = iga, output.col.name = "iga")
+  testing.bcells <- scGate(data = testing.bcells, model = igd, output.col.name = "igd")
+}
+
+
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd79" ) + theme(aspect.ratio = 1) + ggtitle("cd79")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd19" ) + theme(aspect.ratio = 1) + ggtitle("cd19")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd20" ) + theme(aspect.ratio = 1) + ggtitle("cd20")
+#DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd23" ) + theme(aspect.ratio = 1) + ggtitle("cd23")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd93" ) + theme(aspect.ratio = 1) + ggtitle("cd93")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd138" ) + theme(aspect.ratio = 1) + ggtitle("cd138")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd80" ) + theme(aspect.ratio = 1) + ggtitle("cd80")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "cd86" ) + theme(aspect.ratio = 1) + ggtitle("cd86")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "igm" ) + theme(aspect.ratio = 1) + ggtitle("igm")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "igg" ) + theme(aspect.ratio = 1) + ggtitle("igg")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "iga" ) + theme(aspect.ratio = 1) + ggtitle("iga")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "igd" ) + theme(aspect.ratio = 1) + ggtitle("igd")
+
+
+
+```
+
+```{r, fig.height= 4, fig.width= 5}
+sum(testing.bcells$cd79 == "Pure" | testing.bcells$cd20 == "Pure" | testing.bcells$cd19== "Pure")
+sum(testing.bcells$cd79 == "Pure" | testing.bcells$cd20 == "Pure" )
+
+
+panBcell2 <- scGate::gating_model(name = "cd79", signature = "Cd79a")
+panBcell2 <- scGate::gating_model(panBcell2,name = "cd19", signature = "Cd19")
+panBcell2 <- scGate::gating_model(panBcell2, name = "cd20", signature = "Ms4a1")
+panBcell2 <- scGate::gating_model(panBcell2, name = "plasmaticas_residentes", signature = "Sdc1;Igha;Cd3e-;Cd3d-;Cd4-;Cd8a-")
+```
+
+# plasmaticas residentes
+```{r}
+plasm.resid <- scGate::gating_model( name = "plasmaticas_residentes", signature = "Sdc1;Igha;Cd3e-;Cd3d-;Cd4-;Cd8a-")
+if(run.bcell.markers){
+  testing.bcells <- scGate(data = testing.bcells, model = plasm.resid, output.col.name = "plasm.resid")
+}
+```
+
+```{r, fig.height= 4, fig.width= 5}
+if(run.bcell.markers) {
+  testing.bcells <- scGate(data = testing.bcells, model = panBcell2, output.col.name = "panBcell2")
+  saveRDS(testing.bcells,file = "../processed_data/testing.bcells.rds")
+}
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell2" ) + theme(aspect.ratio = 1) + ggtitle("panBcell2")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid" ) + theme(aspect.ratio = 1) + ggtitle("plasm.resid")
+
+```
+
+* Notas charlando con Caro: prestarle atención a esto
+Igj; IGJ   Union de dímero de IGA y pentámero de IGM
+Tnfrsf17 : BCMA  receptor expresado en PlasmaCell, señal antiapotótica
+
+
+## Subset Bcells and plot with the same reduction
+```{r, fig.height= 4.5,fig.width= 11}
+seurat.pan.Bcells.raw <- seurat.merged.processed%>%subset(seurat_clusters %in% c(0,1,10,13,16,17,18))
+Araw <- DimPlot(seurat.pan.Bcells.raw, group.by = "seurat_clusters")
+seurat.pan.Bcells.raw <- scGate(data = seurat.pan.Bcells.raw, model = panBcell2, output.col.name = "panBcell2HR")
+Braw <- DimPlot(seurat.pan.Bcells.raw, cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell2HR" ) + theme(aspect.ratio = 1) + ggtitle("panBcell2HR")
+Araw + Braw
+```
+
+```{r}
+seurat.pan.Bcells <- seurat.merged.processed%>%subset(seurat_clusters %in% c(0,1,10,13,16,17,18))
+seurat.pan.Bcells <- process_obj(seurat.pan.Bcells ,ndim = 20, nfeat = 500, find_variable_features = T)
+set.seed(1234)
+seurat.pan.Bcells <- FindNeighbors(seurat.pan.Bcells, dims = 1:20)
+seurat.pan.Bcells <- FindClusters(seurat.pan.Bcells, resolution = 0.4)
+```
+
+```{r, fig.height= 4.5,fig.width= 11}
+A <- DimPlot(seurat.pan.Bcells, group.by = "seurat_clusters")
+seurat.pan.Bcells <- scGate(data = seurat.pan.Bcells, model = panBcell2, output.col.name = "panBcell2HR")
+B <- DimPlot(seurat.pan.Bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell2HR" ) + theme(aspect.ratio = 1) + ggtitle("panBcell2HR")
+A + B
+```
+
+
+## Save Pan Bcell data    
+```{r}
+saveRDS(seurat.pan.Bcells,file = panBcellFile)
+```
+
+# I Tried to run SingleR on this dataset but results only make a bit sence at SingleR.main resolution level (i.e. : no use)
+```{r}
+if(F){
+  ref.se <- celldex::ImmGenData()
+  param <- BiocParallel::MulticoreParam(workers = 32)
+  
+  ## broad 
+  result.singler.main = SingleR(test = GetAssayData(seurat.pan.Bcells), ref = ref.se, labels = ref.se$label.main, BPPARAM=param)
+  seurat.pan.Bcells <- AddMetaData(seurat.pan.Bcells, metadata = result.singler.main$pruned.labels,col.name = "SingleR.main")
+  
+  # finer (ontology based)
+  result.singler = SingleR(test = GetAssayData(seurat.pan.Bcells), ref = ref.se,labels = ref.se$label.ont, BPPARAM=param)
+  # get term names
+  cl <- ontoProc::getCellOnto()
+  terms <- result.singler$pruned.labels%>%unique()
+  getTerms <- ontoProc::label_TAG(ontology = cl,terms)
+  seurat.pan.Bcells <- AddMetaData(seurat.pan.Bcells, metadata = result.singler$pruned.labels,col.name = "SingleR.tag")
+  seurat.pan.Bcells <- AddMetaData(seurat.pan.Bcells, metadata = unname(getTerms[result.singler$pruned.labels]),col.name = "SingleR.term")
+
+seurat.pan.Bcells$SingleR.term%>%unique
+(DimPlot(seurat.pan.Bcells,group.by = "SingleR.main")) +  theme(legend.text=element_text(size=5)) #+ NoLegend())
+}
+
+```
+
+```{r, fig.height= 4.5,fig.width= 11}
+
+
+```
+
