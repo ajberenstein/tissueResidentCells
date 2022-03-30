@@ -83,10 +83,6 @@ data.human.genes <- CreateSeuratObject(counts = renamed.counts,meta.data = data.
 
 ```
 
-```{r}
-
-
-```
 
 
 ```{r}
