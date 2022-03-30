@@ -1,0 +1,273 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+renv::activate()
+renv::restore()
+
+library(Seurat)
+library(dplyr)
+library(UCell)
+library(scGate)
+library(ggplot2)
+library(patchwork)
+library(SeuratDisk)
+library(ProjecTILs)
+source("./utils.R")
+```
+# TO DO ##########
+# Prefiltrar células acorde a SCGATE PURE
+# CALCULAR 20 O 50 TOP VARIABLE FEATURES EN BCELLS DEL DATASET MOUSE ORIGINAL (Y TOMAR LOS QUE TAMBIÉN ESTÉN EN Human)
+# Luego usarlos para calcular los anchors de integración. 
+# VER SI DA MÁS CONSISTENTE EL ANÁLISIS. 
+
+Capture Variable feautures from Azimuth reference:
+```{r}
+download = F
+if(download){
+  options(timeout=3600)
+  download.file("https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat",destfile = "../data/pbmc_multimodal.h5seurat")
+}else{
+  reference <- LoadH5Seurat("~/Dropbox/Amezcua/data/pbmc_multimodal.h5seurat")
+}
+bref <- subset(reference,celltype.l1=="B") 
+bref <- FindVariableFeatures(bref, assay = "SCT", selection.method = "vst", nfeatures = 800 , verbose = FALSE)
+az.hvgs.mm <- subset(ProjecTILs::Hs2Mm.convert.table,Gene.HS %in% az.hvgs@assays$SCT@var.features)$Gene.MM
+az.hvgs.mm <- setdiff(az.hvgs.mm,scGate::genes.blacklist.default$Mm)
+bref@assays$SCT@var.features <- az.hvgs.mm
+```
+
+# compute Important genes spliting categories
+```{r}
+bref$celltype.l2%>%table
+bref2 <- bref%>%subset(celltype.l2 %in% c("B intermediate", "B naive", "B memory"))
+Idents(bref2) <- "celltype.l2"
+discrim.genes <- FindAllMarkers(bref2,assay = "SCT",min.pct = 0.2,min.diff.pct = 0.2)
+discrim.genes$cluster%>%table
+#discrim.genes
+discrim.genes.mm <- subset(ProjecTILs::Hs2Mm.convert.table,Gene.HS %in% discrim.genes$gene)$Gene.MM
+discrim.genes.mm <- intersect(discrim.genes.mm,data%>%rownames())
+```
+
+
+# Compute new umap space based on reference variable features
+```{r}
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+data <- readRDS(panBellFile)
+data%>%dim
+data <- data%>%subset(panBcell2HR == "Pure")
+data%>%dim
+
+ndim = 30; seed = 31416
+data.dp2 <- NormalizeData(data.dp2, verbose = TRUE)
+#data.dp2 <- FindVariableFeatures(data.dp2, selection.method = "vst", nfeatures = 800 , verbose = FALSE)
+#data.dp2@assays$RNA@var.features <-  setdiff(data.dp2@assays$RNA@var.features,scGate::genes.blacklist.default$Mm)
+data.dp2@assays$RNA@var.features <-  intersect(bref@assays$SCT@var.features,data.dp2%>%rownames())
+data.dp2 <- ScaleData(data.dp2, verbose = TRUE)
+data.dp2 <- RunPCA(data.dp2, features = data.dp2@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.dp2 <- RunUMAP(data.dp2, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 30)
+
+```
+
+
+
+# Explore some markers among defined celltypes
+
+## Plasmáticas residentes IgA+
+```{r,fig.width= 12,fig.height=8}
+FeaturePlot(data.dp2,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
+```
+
+
+```{r,fig.height=7,fig.width=10}
+plasm.resid.1 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Cd3e-;Cd3d-;Cd4-;Cd8a-")
+data.dp2 <- scGate(data = data.dp2, model = plasm.resid.1, output.col.name = "plasm.resid.1")
+
+plasm.resid.2 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1")
+data.dp2 <- scGate(data = data.dp2, model = plasm.resid.2, output.col.name = "plasm.resid.2")
+
+plasm.resid.3 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17")
+data.dp2 <- scGate(data = data.dp2, model = plasm.resid.3, output.col.name = "plasm.resid.3")
+
+plasm.resid.4 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17;Igj")
+data.dp2 <- scGate(data = data.dp2, model = plasm.resid.4, output.col.name = "plasm.resid.4")
+
+plasm.resid.5 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17;Igj;Cd28")
+data.dp2 <- scGate(data = data.dp2, model = plasm.resid.5, output.col.name = "plasm.resid.5")
+
+
+p1 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.1" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+",caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.1=="Pure")))
+
+p2 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.2" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1", caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.2=="Pure")))
+
+p3 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.3" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+",caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.3=="Pure")))
+
+p4 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.4") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+",caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.4=="Pure")))
+
+p5 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.5") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+ Cd28+", caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.5=="Pure")))
+
+wrap_plots(list(p1,p2,p3,p4,p5))
+```
+
+
+## Explore all involved markers
+```{r,fig.height=15,fig.width=12}
+features = c("Ighm","Ighd1-1","Igha","Ighg1","Cd19","Ms4a1","Fcer2a","Cd24a","Cd38","Pdcd1lg2","Nt5e","Entpd1","Cd80","Cd86","Cd93","Cd69","Itgal","Cd44","Cd28","Sdc1",	"Prdm1","Tnfrsf17","Sell","Igj")
+FeaturePlot(data.dp2,features = features,ncol = 5)
+data.dp2%>%rownames()%>%grep("Cd28",.,value=T)
+```
+
+
+```{r,fig.width=30,fig.height=25}
+discrim.genes.mm%>%length()
+average.expr <- Seurat::AverageExpression(data.dp2,features = discrim.genes.mm)
+discrim.genes.mm <- discrim.genes.mm[average.expr$RNA%>%rowSums()>0]
+discrim.genes.mm%>%length()
+  
+FeaturePlot(data.dp2,features = discrim.genes.mm[1:56] ,ncol = 8) 
+FeaturePlot(data.dp2,features = discrim.genes.mm[57:length(discrim.genes.mm)] ,ncol = 8)
+f1 <- c("Fcgr2b","Lsp1","zbtb20","Fcer2a","Lgals1","Itgb7","Ptpn1","Syk","Anxa2","Marcks","Odc1","S100a10","Coll1","Rgs2")
+f2 <- c("Rllpl2","Cd72","Crip1","Capg","Sec11c","Ahnak")
+
+```
+
+
+```{r,fig.height=7,fig.width=12}
+f1 <- c("Fcgr2b","Lsp1","zbtb20","Fcer2a","Lgals1","Itgb7","Ptpn1","Syk","Anxa2","Marcks")
+f2 <- c("Odc1","S100a10","Coll1","Rgs2","Rllpl2","Cd72","Crip1","Capg","Sec11c","Ahnak")
+
+FeaturePlot(data.dp2,features = f1,ncol = 4)
+FeaturePlot(data.dp2,features = f2,ncol = 4)
+
+```
+
+
+## Pendiente, volver a mapear pero graficar en UMAP original recalculado con features de la referencia. 
+
+
+```{r}
+discrim.genes.mm.hs <- subset(ProjecTILs::Hs2Mm.convert.table ,Gene.MM %in% discrim.genes.mm)$Gene.HS
+discrim.genes.mm.hs <- subset(ProjecTILs::Hs2Mm.convert.table ,Gene.MM %in% c("Crip1","S100a10","Anxa2"))$Gene.HS
+
+discrim.genes[discrim.genes$gene%in%discrim.genes.mm.hs,]
+```
+
+
+
+
+## B.Mem sin switch
+```{r,fig.height=8,fig.width=12}
+FeaturePlot(data.dp2,features = c("Ighm","Ighd1-1","Cd19","Ms4a1","Cd69","Fcer2a","Itgal","Cd80","Cd86", "Ighg1"),ncol = 3)
+data.dp2%>%rownames()%>%grep("Itgal",.,value=T)
+```
+
+```{r}
+B.mem.noSwitch.1 <- scGate::gating_model(name = "BMem1", signature = "Cd19;Ms4a1;Ighm-") 
+#"Cd69;Itgal;Cd80;cd86") # Bmem no switch
+
+B.mem.noSwitch.2 <- scGate::gating_model(,name = "BMem2",signature = "Cd19;Ms4a1;Ighm-")
+
+
+
+
+data.dp2 <- scGate(data = data.dp2, model = B.mem.noSwitch.1, output.col.name = "BMem.noSwitch.1")
+data.dp2 <- scGate(data = data.dp2, model = B.mem.noSwitch.2, output.col.name = "BMem.noSwitch.2")
+
+p1 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "BMem.noSwitch.1" ) + theme(aspect.ratio = 1) + ggtitle("BMem.noSwitch.1") + 
+  labs(subtitle =  "*markers*",caption = sprintf("Ncells: %s",sum(data.dp2$BMem.noSwitch.1=="Pure")))
+
+p2 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "BMem.noSwitch.2" ) + theme(aspect.ratio = 1) + ggtitle("BMem.noSwitch.2") + 
+  labs(subtitle =  "*markers*",caption = sprintf("Ncells: %s",sum(data.dp2$BMem.noSwitch.2=="Pure")))
+
+
+p1 + p2
+```
+
+
+
+
+
+
+## B Naive residentes
+```{r,fig.height=8,fig.width=12}
+FeaturePlot(data.dp2,features = c("Ighm","Ighd1-1","Cd19","Ms4a1","Fcer2a","Sell"),ncol = 3)
+data.dp2%>%rownames()%>%grep("Ighm",.,value=T)
+```
+
+
+```{r}
+# "Ighm;Ighd1-1;Cd19;Ms4a1;Fcer2a;Sell"
+naive.resid.1 <- scGate::gating_model(name = "Igm", signature = "Ighm")
+naive.resid.1 <- scGate::gating_model(naive.resid.1,name = "Igd",signature = "Ighd1-1")
+naive.resid.1 <- scGate::gating_model(naive.resid.1,name = "Neg.Igs",signature = "Igha;Ighg1",negative = T)
+
+#;Sell;Cd19;Ms4a1;Fcer2a")
+
+#naive.resid.1
+#naive.resid.1 <- scGate::gating_model(naive.resid.1,name = "Neg.Cds", signature = "Cd24a;Cd38",negative = T)
+
+data.dp2 <- scGate(data = data.dp2, model = naive.resid.1, output.col.name = "naive.resid.1")
+p1 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "naive.resid.1" ) + theme(aspect.ratio = 1) + ggtitle("Naiveresid") + 
+  labs(subtitle =  "Cd138+ Igha+",caption = sprintf("Ncells: %s",sum(data.dp2$naive.resid.1=="Pure")))
+
+p1
+```
+
+## Plasmoblastos IgA+
+```{r,fig.height=8,fig.width=12}
+FeaturePlot(data.dp2,features = c("Ighm","Igha","Cd19","Ms4a1","Cd38","Cd93","Sdc1","Prdm1","Tnfrsf17"),ncol = 4)
+data.dp2%>%rownames()%>%grep("Cd24",.,value=T)
+```
+
+
+```{r}
+# kappa chain
+kappa <- scGate::gating_model(name = "kappa", signature = "Igkc")
+data.dp2 <- scGate(data = data.dp2, model = kappa, output.col.name = "kappa")
+p1 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "kappa" ) + theme(aspect.ratio = 1) + ggtitle("kappa")
+
+# Lambda chain
+lambda <- scGate::gating_model(name = "kappa", signature = "Iglc2")
+data.dp2 <- scGate(data = data.dp2, model = lambda, output.col.name = "lambda")
+p2 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "lambda" ) + theme(aspect.ratio = 1) + ggtitle("lambda")
+```
+
+
+```{r,fig.height=3,fig.width=8}
+p1 + p2
+data.d
+```
+
+
+```{r}
+igls <- data%>%rownames()%>%grep("^Igl",.,value = T)
+igls
+DoHeatmap(data,features = igls)
+DimPlot(data.dp2)
+DimPlot(data.dp2,group.by = "SingleR.term") + NoLegend()
+
+#data.dp2$SingleR.term%>%table
+```
+
+```{r,fig.height= 8,fig.width= 10}
+extra.markers <- c("Cd19","Ms4a1","Cd38","Cd69","Cd93","Sdc1","Itgal")
+igs <- c("Ighm", "Ighg1", "Igha","Igkc","Iglc2")
+#VlnPlot(data, features = c("Ighm", "Ighg1", "Igha","Igkc","Iglc2"), stack = T) + NoLegend()
+FeaturePlot(data, features = igs) + NoLegend()
+
+```
+
+```{r}
+p7 <-DimPlot(mouse.data.mapped, reduction = "umap", group.by  = "predicted.celltype.l3", label = TRUE, label.size = 3 ,repel = TRUE) 
+p7
+```
+
