@@ -1,0 +1,200 @@
+---
+title: "Exploring Bcell markers in Amezcua 2019 dataset"
+author: "A. Berenstein"
+date: "22/04/2022"
+output:
+  rmdformats::readthedown:
+    self-contained: true
+    highlight: haddock
+    thumbnails: false
+    css: styles.css
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file, encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'explore_cluster_signatures.html'))})
+---
+
+
+```{r, message=F, warning=F,results=F}
+renv::activate()
+renv::restore()
+
+library(Seurat)
+library(dplyr)
+library(UCell)
+library(scGate)
+library(ggplot2)
+library(patchwork)
+library(SeuratDisk)
+library(ProjecTILs)
+library(glmGamPoi)
+source("./utils.R")
+```
+
+
+
+# Load Bcell-filtered dataset
+```{r,warning=F, collapse =T,message =F}
+ndim = 30; seed = 31416
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+data <- readRDS(panBellFile)
+data%>%dim
+data <- data%>%subset(panBcell2HR == "Pure")
+data%>%dim
+data$condition <- ifelse(data$orig.ident == "DS-017-WT","wt","im") 
+data.bkp <- data
+data.wt <- data%>%subset(orig.ident == "DS-017-WT")
+data.im <- data%>%subset(orig.ident != "DS-017-WT")
+```
+
+Visualize datasets by condition
+```{r,fig.width=6,fig.height=3,warning=F, collapse =T,message =F}
+DimPlot(data,group.by = "orig.ident",split.by = "orig.ident")
+```
+
+# Preprocessing
+
+**We will preprocess separately WT and IM subsets**
+
+## Cell cycle scoring and regression 
+
+The idea here is to mitigate the effects of cell cycle heterogeneity by calculating cell cycle phase scores based on canonical markers, and regressing these out of the data during pre-processing (see [SeuratVignette cell cycle](https://satijalab.org/seurat/articles/cell_cycle_vignette.html) for details)
+
+```{r,warning=F, collapse =T,message =F, results='hide'}
+# extract cell cycle genes from Seurat 
+s.genes <- cc.genes$s.genes%>%hs.2.mm(.)
+g2m.genes <- cc.genes$g2m.genes%>%hs.2.mm(.)
+```
+
+
+```{r,warning=F, collapse =T,message =F,results='hide'}
+# IM
+set.seed(seed)
+data.im <- CellCycleScoring(data.im, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.im$CC.Difference <- data.im$S.Score - data.im$G2M.Score
+data.im <- SCTransform(data.im, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+data.im <- RunPCA(data.im, features = data.im@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.im <- RunUMAP(data.im, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+```
+
+
+```{r,warning=F, collapse =T,message =F, results='hide'}
+# WT
+set.seed(seed)
+data.wt <- CellCycleScoring(data.wt, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.wt$CC.Difference <- data.wt$S.Score - data.wt$G2M.Score
+data.wt <- SCTransform(data.wt, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+data.wt <- RunPCA(data.wt, features = data.wt@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.wt <- RunUMAP(data.wt, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+
+```
+
+
+# Unsupervised analysis
+```{r,fig.height=4, fig.width= 10,warning=F, collapse =T,message =F, results='hide'}
+set.seed(seed)
+data.im <- FindNeighbors(data.im,assay  = "SCT", dims = 1:20)
+data.im <- FindClusters(data.im, resolution = 0.7)
+data.im <- FindClusters(data.im, resolution = 0.5)
+data.im <- FindClusters(data.im, resolution = 0.4)
+data.im <- FindClusters(data.im, resolution = 0.3)
+
+set.seed(seed)
+data.wt <- FindNeighbors(data.wt,assay  = "SCT", dims = 1:20)
+data.wt <- FindClusters(data.wt, resolution = 0.7)
+data.wt <- FindClusters(data.wt, resolution = 0.5)
+data.wt <- FindClusters(data.wt, resolution = 0.4)
+data.wt <- FindClusters(data.wt, resolution = 0.3)
+
+a <- DimPlot(data.wt,group.by = "SCT_snn_res.0.3",label = T)
+b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.3",label = T)
+a + b
+```
+
+
+```{r,fig.height= 12,fig.width=10,warning=F, collapse =T,message =F}
+Idents(data.wt) <- "SCT_snn_res.0.3"
+discrim.wt <- FindAllMarkers(data.wt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+gene.wt <- discrim.wt$gene
+d <- DoHeatmap(data.wt,features = gene.wt)
+
+Idents(data.im) <- "SCT_snn_res.0.3"
+discrim.im <- FindAllMarkers(data.im,assay = "SCT", only.pos = T, min.pct = 0.40, logfc.threshold = 0.25)
+gene.im <- discrim.im$gene
+e <- DoHeatmap(data.im,features = gene.im,size = 3,lines.width = 35)
+
+# show WT heatmap
+d 
+
+# show IM heatmap
+e 
+ 
+```
+
+
+# DimPlot using Heatmap genes
+
+Plot again clusters in WT and IM datasets
+```{r,fig.height=4, fig.width= 10,warning=F, collapse =T,message =F, results='hide'}
+a + b
+```
+
+WT dataset
+```{r,collapse =T,fig.width=14,fig.height=35,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = discrim.wt$gene,ncol = 5)
+```
+
+IM dataset
+```{r,fig.width= 15,fig.height= 40,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = intersect(discrim.im$gene,data.im%>%rownames()),ncol = 5)
+```
+
+
+# Explore predefined markers 
+
+We will use here those genes previously defined in our molecular signature spreadsheet file
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
+features = c("Ighm","Ighd1-1","Igha","Ighg1","Cd19","Ms4a1","Fcer2a","Cd24a","Cd38","Pdcd1lg2","Nt5e","Entpd1","Cd80","Cd86","Cd93","Cd69","Itgal","Cd44","Cd28","Sdc1",	"Prdm1","Tnfrsf17","Sell","Igj")
+```
+
+WT dataset
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = features, ncol = 5)
+```
+
+IM dataset
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = features, ncol = 5)
+```
+
+
+# Explore markers of resident plasmatic cells (IgA+)
+WT dataset
+```{r,fig.width= 12,fig.height=8,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
+```
+
+IM dataset
+```{r,fig.width= 13,fig.height=7,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
+```
+
+Include scGate model
+```{r,fig.height=4,fig.width=8,warning=F, collapse =T,message =F}
+plasm.resid.4 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17;Igj")
+data.im <- scGate(data = data.im, model = plasm.resid.4, output.col.name = "plasm.resid.4")
+p4.im <- DimPlot(data.im, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.4") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+",caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.4=="Pure")))
+
+data.wt <- scGate(data = data.wt, model = plasm.resid.4, output.col.name = "plasm.resid.4")
+p4.wt <- DimPlot(data.wt, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.4") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+",caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.4=="Pure")))
+
+wrap_plots(list(p4.wt,p4.im))
+```
+
+
