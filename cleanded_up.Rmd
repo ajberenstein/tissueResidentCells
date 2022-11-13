@@ -1,0 +1,664 @@
+---
+title: "Semi-Supervised STACAS demo"
+author: "A. Berenstein, C.Amezcua"
+date: "22/07/2022"
+output:
+  rmdformats::readthedown:
+    self-contained: true
+    highlight: haddock
+    thumbnails: false
+    css: styles.css
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file, encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'PanBcellDef.html'))})
+---
+
+# Introduction 
+This notebook will work on data produced by Amezcua et al. (Cell 2019)
+In that work, Amezcua analyzed tissue resident Th cells. 
+Now, the idea is to recycle those data but redirecting the focus on Bcells. In particular, those tissue resident ones. 
+
+
+```{r}
+renv::activate()
+renv::restore()
+renv::snapshot()
+#install.packages("Seurat")
+#install.packages("remotes")
+#remotes::install_github("carmonalab/UCell")
+#remotes::install_github("carmonalab/scGate")
+#install.packages("BiocManager")
+#BiocManager::install("SingleR")
+#BiocManager::install("celldex")
+#BiocManager::install("ontoProc")
+#BiocManager::install("rmarkdown")
+
+library("Seurat")
+library("dplyr")
+library("UCell")
+library("scGate")
+library("SingleR")
+library("ggplot2")
+source("./utils.R")
+
+```
+
+# Load datasets from counts
+```{r}
+path <- c("~/Dropbox/Amezcua/data")
+samples <- c("DS-017-WT","DS-017-Im1","DS-017-Im2")
+count_files <- paste(path,samples,"gene_exon_tagged_dge.txt.gz",sep = "/")
+
+# Output files:
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/seurat_processed_07_22.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+
+```
+
+## Load proccessed object
+```{r}
+if(file.exists(panBellFile)){
+  run =F
+  seurat.merged.processed <- seurat.pan.Bcells <- readRDS(panBellFile)  
+}else{
+  run =T
+}
+
+```
+
+
+#create Seurat objects
+```{r}
+if(run){
+  seuratDataList <- list()
+  for(i in seq_along(samples)){
+    countdata <- read.table(
+      file = count_files[i],
+      header = T,
+      row.names = 1
+    )
+      
+    obj <- Seurat::CreateSeuratObject(counts = countdata,project = samples[i])
+    seuratDataList[[i]] <- obj
+  }
+  ncell <- table(unlist(sapply(seuratDataList,colnames)))
+  to.drop <- names(ncell[ncell>1])
+  
+  # remove 4 barcodes duplicated across samples
+  seuratDataList = lapply(seuratDataList,function(x){
+    res = subset(x,cells = setdiff(colnames(x),to.drop) )
+    return(res)
+  })
+}
+```
+
+
+# quality filtering
+```{r,fig.height= 8,fig.width= 13}
+if(run){
+  seurat.merged <- Reduce(merge, seuratDataList)
+  seurat.merged@meta.data%>%head()
+  
+  percent.ribo.dv <- PercentageFeatureSet(seurat.merged, pattern = "^Rp[ls]")
+  percent.mito.dv <- PercentageFeatureSet(seurat.merged, pattern = "^mt-")
+  
+  seurat.merged <- AddMetaData(seurat.merged, metadata = percent.ribo.dv, col.name = "percent.ribo")
+  seurat.merged <- AddMetaData(seurat.merged, metadata = percent.mito.dv, col.name = "percent.mito")
+Seurat::VlnPlot(seurat.merged,features = c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),group.by = "orig.ident",ncol = 2)
+}  
+```
+
+```{r}
+splited.by.sample <- SplitObject(seurat.merged, split.by = "orig.ident")
+x <- splited.by.sample[[3]]
+q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+q
+```
+
+# Filter low or high expressed cells 
+```{r}
+if(run){
+  splited.by.sample <- SplitObject(seurat.merged, split.by = "orig.ident")
+  
+  splited.by.sample.qc <- lapply(splited.by.sample, function(x) {
+     #n UMIs
+     q <- quantile(x@meta.data$nCount_RNA, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99))
+     x <- subset(x, subset=nCount_RNA>max(q["10%"]) & nCount_RNA<q['95%']) 
+     
+     #n genes
+     q <- quantile(x@meta.data$nFeature_RNA, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99))
+     x <- subset(x, subset=nFeature_RNA>max(q['10%']) & nFeature_RNA < q['95%'])
+     
+     #% ribo
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+     x <- subset(x, subset=percent.ribo>q['1%'] & percent.ribo < min(50,q['99%']) )
+     
+     #% mito
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+     x <- subset(x, subset=percent.mito < q['99%'])
+     return(x)
+  })
+  
+  seurat.filtered.merged <- Reduce(merge, splited.by.sample.qc)
+  dim(seurat.merged)
+  dim(seurat.filtered.merged)
+}else{
+  seurat.filtered.merged <- seurat.merged.processed
+}
+
+sapply(c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),function(x){summary(seurat.filtered.merged[[x]])})
+seurat.filtered.merged
+```
+
+## Control step: how many cells were dropped by high expression values? (Re: 262 cells)
+```{r}
+if(run){
+  high.expr.dropped <- lapply(splited.by.sample, function(x){
+     q <- quantile(x@meta.data$nCount_RNA, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99))
+     x_ncount <- subset(x, nCount_RNA>q['95%']) 
+     
+     #n genes
+     q <- quantile(x@meta.data$nFeature_RNA, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99))
+     x_nfeature <- subset(x, subset= nFeature_RNA > q['95%'])
+     
+     #% ribo
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99),na.rm =T)
+     x_ribo <- subset(x, subset=percent.ribo > min(50,q['99%']))
+     
+     #% mito
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99),na.rm =T)
+     x_mito <- subset(x, subset=percent.mito > q['99%'])
+     
+     return(table(c(x_ncount%>%colnames(), x_nfeature%>%colnames(),x_ribo%>%colnames(),x_ribo%>%colnames())))
+    }
+  )
+  
+  # 262 cells dropped by staying over the top 1% quantile in any of control quantity
+  cells.dropped.by.hihg.quantile <- unlist(high.expr.dropped)
+  cells.dropped.by.hihg.quantile%>%length()
+}
+```
+
+
+## Sanity check: visual detection of possible bach effects (Re: thats ok)
+```{r,fig.height= 4.5,fig.width= 12}
+ndim = 20      # for pca
+nfeat = 1000    # number of most variable features to be considered
+
+# scale data; find variable features, run pca and run umap
+if(run) seurat.merged.processed <- process_obj(seurat.filtered.merged,ndim = ndim, nfeat = nfeat, find_variable_features = T) 
+DimPlot(seurat.merged.processed,,split.by = "orig.ident")
+```
+
+# 7275 cells
+# 18.886 features 
+```{r}
+seurat.merged.processed
+```
+
+## run singleR
+```{r}
+if(run){
+  ref.se <- celldex::ImmGenData()
+  param <- BiocParallel::MulticoreParam(workers = 32)
+  
+  ## broad 
+  result.singler.main = SingleR(test = GetAssayData(seurat.merged.processed), ref = ref.se, labels = ref.se$label.main, BPPARAM=param)
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = result.singler.main$pruned.labels,col.name = "SingleR.main")
+
+  if(F){  
+  # finer (ontology based)
+    result.singler = SingleR(test = GetAssayData(seurat.merged.processed), ref = ref.se,labels = ref.se$label.ont, BPPARAM=param)
+    # get term names
+    cl <- ontoProc::getCellOnto()
+    terms <- result.singler$pruned.labels%>%unique()
+    getTerms <- ontoProc::label_TAG(ontology = cl,terms)
+    seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = result.singler$pruned.labels,col.name = "SingleR.tag")
+    seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = unname(getTerms[result.singler$pruned.labels]),col.name = "SingleR.term")
+  }
+}
+
+```
+
+How many LinB cells do we filtered out? 
+```{r}
+(seurat.merged.processed%>%subset(SingleR.main == "B cells"))$orig.ident%>%table()
+```
+
+
+# visualize SingleR classification
+
+```{r,fig.height= 6,fig.width= 6}
+Fig1a = DimPlot(seurat.merged.processed,group.by = "SingleR.main",label =T,repel =T,label.size = 3) + theme(aspect.ratio = 1) + labs(tag = "A")
+ggsave("plots/Jul22/fig1a_singleR.pdf",plot = Fig1a,width = 7, height = 7)
+ggsave("plots/Jul22/fig1a_singleR.png",plot = Fig1a,width = 7, height = 7)
+ggsave("plots/Jul22/fig1a_singleR.tiff",plot = Fig1a,width = 7, height = 7)
+Fig1a
+
+```
+
+# Clustering whole assay
+```{r}
+if(run){
+  set.seed(1234)
+  seurat.merged.processed <- FindNeighbors(seurat.merged.processed, dims = 1:20)
+  seurat.merged.processed <- FindClusters(seurat.merged.processed, resolution = 0.7)
+}
+```
+
+
+```{r,fig.height= 5,fig.width= 5}
+Fig1b  <- DimPlot(seurat.merged.processed,group.by = "seurat_clusters",label = T,label.size = 3) + theme(aspect.ratio = 1)  +  xlim(-20, 15) + ylim(-12, 17) + labs(tag = "B")
+ggsave("plots/Jul22/Fig1b.pdf", plot = Fig1b,width = 7, height = 7)
+ggsave("plots/Jul22/Fig1b.png",plot = Fig1b,width = 7, height = 7)
+ggsave("plots/Jul22/Fig1b.tiff",plot = Fig1b,width = 7, height = 7)
+bcell_clusters = c("0","2","10","17")
+Fig1b
+
+```
+
+
+```{r,fig.height= 7,fig.width= 9}
+
+SFig1a <- DimPlot(seurat.merged.processed%>%subset(SingleR.main == "B cells"), group.by = "SingleR.main",label =T,repel =T,label.size = 3) +
+  theme(aspect.ratio = 1)  +  xlim(-20, 15) + ylim(-12, 17) + ggtitle("SingleR B cells") + labs(tag = "A")
+SFig1a
+
+SFig1b <- DimPlot(seurat.merged.processed%>%subset(seurat_clusters %in% bcell_clusters),group.by = "seurat_clusters",label = T,label.size = 3) + 
+  NoLegend() +  theme(aspect.ratio = 1)  +  xlim(-20, 15) + ylim(-12, 17) + ggtitle("Only BCell clusters (0,2,10,17)") + labs(tag = "B")
+
+notBcell = setdiff(seurat.merged.processed$seurat_clusters%>%unique() ,bcell_clusters) 
+SFig1c <- DimPlot(seurat.merged.processed%>%subset(seurat_clusters %in% notBcell),group.by = "seurat_clusters",label = T,label.size = 3)  + 
+  NoLegend() +  xlim(-20, 15) + ylim(-12, 17) + ggtitle("Removing BCell clusters") + labs(tag = "C")
+
+SFig1d <- DimPlot(seurat.merged.processed%>%subset(seurat_clusters %in% "7"),group.by = "seurat_clusters",label = T,label.size = 3) + 
+  NoLegend() +  theme(aspect.ratio = 1)  +  xlim(-20, 15) + ylim(-12, 17) + ggtitle("Mac-Mono Cluster (7)") + labs(tag = "D")
+
+
+
+SFig1 <- SFig1a + SFig1b + SFig1c + SFig1d
+
+ggsave("plots/Jul22/SFig1_singleR.pdf",plot = SFig1,width = 12, height = 10)
+ggsave("plots/Jul22/SFig1_singleR.png",plot = SFig1,width = 12, height = 10)
+ggsave("plots/Jul22/SFig1_singleR.tiff",plot = SFig1,width = 12, height = 10)
+SFig1
+
+```
+
+
+
+# scGate
+The idea is to filter out some impure cells/doublets that could be passed thorough SingleR filtering model
+```{r, fig.height= 4, fig.width= 5}
+panBcell <- scGate::gating_model(name = "cd79", signature = "Cd79a")
+panBcell <- scGate::gating_model(panBcell,name = "cd19", signature = "Cd19")
+panBcell <- scGate::gating_model(panBcell, name = "cd20", signature = "Ms4a1")
+panBcell <- scGate::gating_model(panBcell, name = "plasmaticas_residentes", signature = "Sdc1;Igha")
+panBcell <- scGate::gating_model(panBcell, name = "Tcell", signature = "Cd3e;Cd3d;Cd4;Cd8a", negative = T)
+panBcell <- scGate::gating_model(panBcell, name = "myeloid", signature = "Spi1", negative = T)
+panBcell <- scGate::gating_model(panBcell, name = "MoMacDC", signature = "Lyz1;Lyz2;Csf1r;Msr1;Mafb;Cd300e", negative = T)
+panBcell <- scGate::gating_model(panBcell, name = "Macrophage", signature = "Cd40;Cd68;Cd14;Fcgr1a", negative = T)
+```
+
+```{r, fig.height= 4.5,fig.width= 5}
+set.seed(1234)
+
+seurat.merged.processed <- scGate(data = seurat.merged.processed, model = panBcell, output.col.name = "panBcell")
+
+Fig1c <- DimPlot(seurat.merged.processed, cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell" ) + 
+  theme(aspect.ratio = 1) + ggtitle("scGate: panBcell model") + theme(aspect.ratio = 1)  +  xlim(-20, 15) + ylim(-12, 17) + labs(tag = "C")
+seurat.merged.processed$panBcell%>%table()
+
+ggsave("plots/Jul22/Fig1c.pdf",plot = Fig1c,width = 7, height = 7)
+ggsave("plots/Jul22/Fig1c.png",plot = Fig1c,width = 7, height = 7)
+ggsave("plots/Jul22/Fig1c.tiff",plot = Fig1c,width = 7, height = 7)
+
+Fig1c
+
+```
+
+
+
+## Filtering Bcells
+```{r}
+seurat.merged.processed$SinlgeR_Seurat_scGate = (seurat.merged.processed$SingleR.main == "B cells") & (seurat.merged.processed$seurat_clusters %in% bcell_clusters) & (seurat.merged.processed$panBcell == "Pure") 
+
+seurat.merged.processed$SinlgeR_Seurat_scGate%>%table()
+(seurat.merged.processed%>%subset(SinlgeR_Seurat_scGate == TRUE))$orig.ident%>%table()  
+
+seurat.pan.Bcells <- seurat.merged.processed %>%subset(SinlgeR_Seurat_scGate == TRUE)
+seurat.pan.Bcells
+```
+
+
+```{r}
+SFig2 <- DimPlot(seurat.pan.Bcells,group.by = "SinlgeR_Seurat_scGate",label.size = 3) + theme(aspect.ratio = 1) +  xlim(-20, 15) + ylim(-12, 17)  + NoLegend() + ggtitle("SingleR + SeuratClusters + scGate")
+ggsave("plots/Jul22/SFig2.pdf",plot = SFig2,width = 7, height = 7)
+ggsave("plots/Jul22/SFig2.png",plot = SFig2,width = 7, height = 7)
+ggsave("plots/Jul22/SFig2.tiff",plot = SFig2,width = 7, height = 7)
+SFig2
+```
+
+Manually remove outliers
+```{r}
+aux = DimPlot(seurat.pan.Bcells)
+seurat.pan.Bcells$outliers_umap <- (aux$data$UMAP_1 < -5 | aux$data$UMAP_2 < -1)
+seurat.pan.Bcells <- seurat.pan.Bcells%>%subset(outliers_umap == FALSE)
+seurat.pan.Bcells$orig.ident%>%table()  
+
+Fig1d <- DimPlot(seurat.pan.Bcells,group.by = "SinlgeR_Seurat_scGate",label.size = 3) + theme(aspect.ratio = 1) +  xlim(-20, 15) + ylim(-12, 17)  + NoLegend() + ggtitle("lin B cells")  + labs(tag = "D")
+
+ggsave("plots/Jul22/Fig1d.pdf",plot = Fig1d,width = 7, height = 7)
+ggsave("plots/Jul22/Fig1d.png",plot = Fig1d,width = 7, height = 7)
+ggsave("plots/Jul22/Fig1d.tiff",plot = Fig1d,width = 7, height = 7)
+
+
+Fig1d
+```
+
+```{r, fig.height= 10,fig.width= 12}
+Fig1 <-  Fig1a + Fig1b + Fig1c + Fig1d
+ggsave("plots/Jul22/Fig1.pdf",plot = Fig1,width = 12, height = 10)
+ggsave("plots/Jul22/Fig1.png",plot = Fig1,width = 12, height = 10)
+ggsave("plots/Jul22/Fig1.tiff",plot = Fig1,width = 12, height = 10)
+Fig1
+
+```
+
+
+## Save filtered dataset
+```{r}
+if(run){
+  set.seed(1234)
+  saveRDS(seurat.pan.Bcells,file = panBellFile)
+}
+```
+
+## Split WT and IM datasets and analize them
+# Load Bcell-filtered dataset
+```{r,warning=F, collapse =T,message =F}
+ndim = 30; seed = 31416
+data <- readRDS(panBellFile)
+data%>%dim
+data$condition <- ifelse(data$orig.ident == "DS-017-WT","wt","im") 
+data.bkp <- data
+data.wt <- data%>%subset(orig.ident == "DS-017-WT")
+data.im <- data%>%subset(orig.ident != "DS-017-WT")
+```
+Visualize datasets by condition
+```{r,fig.width=6,fig.height=3,warning=F, collapse =T,message =F}
+fig2 <- DimPlot(data,group.by = "orig.ident",split.by = "orig.ident")
+ggsave("plots/Jul22/Fig2.pdf",plot = fig2,width = 12, height = 4)
+ggsave("plots/Jul22/Fig2.png",plot = fig2,width = 12, height = 4)
+ggsave("plots/Jul22/Fig2.tiff",plot = fig2,width = 12, height = 4)
+fig2
+```
+
+# Preprocessing
+
+**We will preprocess separately WT and IM subsets**
+
+## Cell cycle scoring and regression 
+
+The idea here is to mitigate the effects of cell cycle heterogeneity by calculating cell cycle phase scores based on canonical markers, and regressing these out of the data during pre-processing (see [SeuratVignette cell cycle](https://satijalab.org/seurat/articles/cell_cycle_vignette.html) for details)
+
+```{r,warning=F, collapse =T,message =F, results='hide'}
+# extract cell cycle genes from Seurat 
+s.genes <- cc.genes$s.genes%>%hs.2.mm(.)
+g2m.genes <- cc.genes$g2m.genes%>%hs.2.mm(.)
+```
+
+
+```{r,warning=F, collapse =T,message =F, results='hide'}
+# WT
+set.seed(seed)
+data.wt <- CellCycleScoring(data.wt, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.wt$CC.Difference <- data.wt$S.Score - data.wt$G2M.Score
+data.wt <- SCTransform(data.wt, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+data.wt <- RunPCA(data.wt, features = data.wt@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.wt <- RunUMAP(data.wt, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+```
+
+
+
+```{r,warning=F, collapse =T,message =F,results='hide'}
+# IM
+set.seed(seed)
+
+data.im <- CellCycleScoring(data.im, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.im$CC.Difference <- data.im$S.Score - data.im$G2M.Score
+
+# work as usual (only variable genes)
+data.im <- SCTransform(data.im, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+data.im <- RunPCA(data.im, features = data.im@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.im <- RunUMAP(data.im, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+```
+
+# Unsupervised analysis
+```{r,fig.height=4, fig.width= 10,warning=F, collapse =T,message =F, results='hide'}
+set.seed(seed)
+data.im <- FindNeighbors(data.im,assay  = "SCT", dims = 1:20)
+data.im <- FindClusters(data.im, resolution = 0.7)
+data.im <- FindClusters(data.im, resolution = 0.5)
+data.im <- FindClusters(data.im, resolution = 0.4)
+data.im <- FindClusters(data.im, resolution = 0.3)
+data.im <- FindClusters(data.im, resolution = 0.35)
+
+
+set.seed(seed)
+data.wt <- FindNeighbors(data.wt,assay  = "SCT", dims = 1:20)
+#data.wt <- FindClusters(data.wt, resolution = 2)
+data.wt <- FindClusters(data.wt, resolution = 1.5)
+data.wt <- FindClusters(data.wt, resolution = 1)
+data.wt <- FindClusters(data.wt, resolution = 0.9)
+data.wt <- FindClusters(data.wt, resolution = 0.8)
+data.wt <- FindClusters(data.wt, resolution = 0.75)
+
+data.wt <- FindClusters(data.wt, resolution = 0.7)
+
+data.wt <- FindClusters(data.wt, resolution = 0.6)
+data.wt <- FindClusters(data.wt, resolution = 0.65)
+
+data.wt <- FindClusters(data.wt, resolution = 0.5)
+data.wt <- FindClusters(data.wt, resolution = 0.4)
+data.wt <- FindClusters(data.wt, resolution = 0.3)
+
+
+Fig3a <- DimPlot(data.wt,group.by = "SCT_snn_res.0.8",label = T)
+Fig3b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.4",label = T)
+
+Fig3a + Fig3b
+
+ggsave("plots/Jul22/Fig3a_clustering_wt_im.pdf",plot = Fig3a,width = 4.5, height = 4) 
+ggsave("plots/Jul22/Fig3a_clustering_wt_im.png",plot = Fig3a,width = 4.5, height = 4)
+ggsave("plots/Jul22/Fig3a_clustering_wt_im.tiff",plot = Fig3a,width = 4.5, height = 4)
+
+ggsave("plots/Jul22/Fig3b_clustering_wt_im.pdf",plot = Fig3b,width = 4.5, height = 4)
+ggsave("plots/Jul22/Fig3b_clustering_wt_im.png",plot = Fig3b,width = 4.5, height = 4)
+ggsave("plots/Jul22/Fig3b_clustering_wt_im.tiff",plot = Fig3b,width = 4.5, height = 4)
+
+
+```
+
+# relation ids old and new clusters (Para que a Caro se le haga más fácil reinterpretar)
+```{r}
+test <- data.im
+original_clustes = read.table("~/Dropbox/Amezcua/tissue_resident_cells/reports/old_im_clusters_0_to_7.tsv")
+colnames(original_clustes) <- c("id","old_SCT_snn_res.0.4")
+
+im_clusters <- test@meta.data%>%select("SCT_snn_res.0.4")
+im_clusters$id <- im_clusters%>%rownames()
+
+im_clusters = merge(im_clusters,original_clustes,by.x = "id",by.y = "id",all.x = F,all.y =F)
+
+
+relation_ids_im = table(im_clusters$SCT_snn_res.0.4,im_clusters$old_SCT_snn_res.0.4)
+write.table(relation_ids_im,"~/Dropbox/Amezcua/tissue_resident_cells/reports/cluster_relation_ids_old_new_UMAPs.tsv",quote = F)
+
+
+test <- data.wt
+original_clustes = read.table("~/Dropbox/Amezcua/tissue_resident_cells/reports/old_wt_clusters_0_to_3.tsv")
+colnames(original_clustes) <- c("id","old_SCT_snn_res.0.8")
+
+wt_clusters <- test@meta.data%>%select("SCT_snn_res.0.8")
+wt_clusters$id <- wt_clusters%>%rownames()
+
+wt_clusters = merge(wt_clusters,original_clustes,by.x = "id",by.y = "id",all.x = F,all.y =F)
+
+
+relation_ids_wt = table(wt_clusters$SCT_snn_res.0.8,wt_clusters$old_SCT_snn_res.0.8)
+relation_ids_wt
+write.table(relation_ids_wt,"~/Dropbox/Amezcua/tissue_resident_cells/reports/wt_cluster_relation_ids_old_new_UMAPs.tsv",quote = F)
+
+```
+
+## Write cluster ids to disk
+```{r}
+write.table(data.im$SCT_snn_res.0.4,"~/Dropbox/Amezcua/tissue_resident_cells/reports/im_jul22_clusters_0_to_7.tsv",sep = "\t",quote = F,col.names = F)
+write.table(data.wt$SCT_snn_res.0.8,"~/Dropbox/Amezcua/tissue_resident_cells/reports/wt_jul22_wt_clusters_0_to_2.tsv",sep = "\t",quote = F,col.names = F)
+```
+
+
+## #############################
+# Marker analysis
+
+```{r,fig.height= 20,fig.width=10,warning=F, collapse =T,message =F}
+Idents(data.wt) <- "SCT_snn_res.0.8"
+discrim.wt <- FindAllMarkers(data.wt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.15)
+discrim.wt <- discrim.wt%>%subset(p_val_adj < 0.05)
+gene.wt <- discrim.wt$gene
+d <- DoHeatmap(data.wt,features = gene.wt)
+
+Idents(data.im) <- "SCT_snn_res.0.4"
+discrim.im <- FindAllMarkers(data.im,assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.15)
+discrim.im.uncorrected <- discrim.im
+discrim.im <- discrim.im%>%subset(p_val_adj < 0.05)
+
+gene.im <- discrim.im$gene
+
+e <- DoHeatmap(data.im,features = gene.im,size = 3,lines.width = 35)
+
+# show WT heatmap
+d 
+
+# show IM heatmap
+e 
+```
+
+
+```{r,eval = F}
+ggsave(d,file = "plots/Jul22/markers_heatmaps/heatmap_fdr005.wt.png",height = 20,width = 10, dpi = 300)
+ggsave(d,file = "plots/Jul22/markers_heatmaps/heatmap_fdr005.wt.tiff",height = 20,width = 10, dpi = 300)
+ggsave(d,file = "plots/Jul22/markers_heatmaps/heatmap_fdr005.wt.pdf",height = 20,width = 10,dpi = 300)
+write.table(discrim.wt,file = "plots/Jul22/markers_heatmaps/markers_fdr005.wt.tsv",sep = "\t",quote =F,row.names =F)
+
+ggsave(e,file = "plots/Jul22/markers_heatmaps/heatmap_fdr005.im.png",height = 20,width = 10,dpi = 300)
+ggsave(e,file = "plots/Jul22/markers_heatmaps/heatmap_fdr005.im.tiff",height = 20,width = 10,dpi = 300)
+ggsave(e,file = "plots/Jul22/markers_heatmaps/heatmap_fdr005.im.pdf",height = 20,width = 10,dpi = 300)
+write.table(discrim.im,file = "plots/Jul22/markers_heatmaps/markers_fdr005.im.tsv",sep = "\t",quote =F,row.names =F)
+```
+
+
+```{r,eval = F}
+# 
+discrim.wt.down <- FindAllMarkers(data.wt, only.pos = FALSE, min.pct = 0.25, logfc.threshold = 0.15)
+discrim.wt.down <- discrim.wt.down%>%subset(p_val_adj < 0.05)
+write.table(discrim.wt.down,file = "plots/Jul22/markers_heatmaps/markers_fdr005.wt_include_downReg.tsv",sep = "\t",quote =F,row.names =F)
+
+
+discrim.im.down <- FindAllMarkers(data.im, only.pos = FALSE, min.pct = 0.25, logfc.threshold = 0.15)
+discrim.im.down <- discrim.im.down%>%subset(p_val_adj < 0.05)
+write.table(discrim.im.down,file = "plots/Jul22/markers_heatmaps/markers_fdr005.im_include_downReg.tsv",sep = "\t",quote =F,row.names =F)
+
+
+```
+
+
+
+```{r,eval=F,echo=F,results=F}
+discrim.im$cluster%>%table()
+discrim.im%>%head((discrim.im$cluster%>%table())["0"])
+discrim.im%>%subset(cluster==5)
+```
+
+
+# DimPlot using Heatmap genes
+
+Plot again clusters in WT and IM datasets
+
+
+```{r,fig.height=4, fig.width= 10,warning=F, collapse =T,message =F, results='hide'}
+a + b
+```
+
+
+WT dataset
+```{r,fig.width= 15,fig.height= 50,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = discrim.wt$gene,ncol = 5)
+```
+
+IM dataset
+```{r,fig.width= 20,fig.height=70,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = intersect(discrim.im$gene,data.im%>%rownames()),ncol = 6)
+```
+
+
+# Explore predefined markers 
+
+We will use here those genes previously defined in our molecular signature spreadsheet file
+
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
+features1 = c("Ighm","Ighd1-1","Igha","Ighg1","Cd19","Ms4a1","Fcer2a","Cd24a","Cd38","Pdcd1lg2","Nt5e","Entpd1","Cd80","Cd86","Cd93","Cd69","Itgal","Cd44","Cd28","Sdc1",	"Prdm1","Tnfrsf17","Sell","Igj")
+features2 <- c("Fas","Bcl6","Cd40","Cxcr5","Cxcr4")
+```
+
+```{r,fig.height= 8,fig.width=8,warning=F, collapse =T,message =F}
+h1 <- DoHeatmap(data.wt,features = features1)
+h2 <- DoHeatmap(data.im,features = features1,size = 3,lines.width = 35)
+
+h1
+h2
+```
+
+
+WT dataset
+
+
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = features1, ncol = 5)
+```
+
+IM dataset
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = features1, ncol = 5)
+```
+
+
+WT dataset (new genes)
+```{r,fig.height=7,fig.width=12,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = features2, ncol = 3)
+```
+
+IM dataset (new genes)
+```{r,fig.height=7,fig.width=12,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = features2, ncol = 3)
+```
+
+
+# Explore markers of resident plasmatic cells (IgA+)
+WT dataset
+```{r,fig.width= 12,fig.height=8,warning=F, collapse =T,message =F}
+FeaturePlot(data.wt,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
+```
+
+IM dataset
+```{r,fig.width= 13,fig.height=7,warning=F, collapse =T,message =F}
+FeaturePlot(data.im,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
+```
+
+
+

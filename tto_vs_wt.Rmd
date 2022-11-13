@@ -1,0 +1,111 @@
+---
+title: "Semi-Supervised STACAS demo"
+author: "A. Berenstein"
+date: "12/04/2022"
+output:
+  rmdformats::readthedown:
+    self-contained: true
+    highlight: haddock
+    thumbnails: false
+    css: styles.css
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file, encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'test.html'))})
+---
+
+
+```{r}
+renv::activate()
+renv::restore()
+
+library(Seurat)
+library(dplyr)
+library(UCell)
+library(scGate)
+library(ggplot2)
+library(patchwork)
+library(SeuratDisk)
+library(ProjecTILs)
+library(glmGamPoi)
+source("./utils.R")
+```
+
+
+
+# Load Amezcua Bcell-filtered dataset
+```{r}
+ndim = 30; seed = 31416
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+data <- readRDS(panBellFile)
+data%>%dim
+data <- data%>%subset(panBcell2HR == "Pure")
+data%>%dim
+data$condition <- ifelse(data$orig.ident == "DS-017-WT","wt","im") 
+data.bkp <- data
+data.wt <- data%>%subset(orig.ident == "DS-017-WT")
+data.im <- data%>%subset(orig.ident != "DS-017-WT")
+```
+
+```{r,fig.width=6,fig.height=3}
+DimPlot(data,group.by = "orig.ident",split.by = "condition")
+```
+
+Cell cycle    
+```{r}
+s.genes <- cc.genes$s.genes%>%hs.2.mm(.)
+g2m.genes <- cc.genes$g2m.genes%>%hs.2.mm(.)
+```
+
+
+```{r}
+# IM
+data.im <- CellCycleScoring(data.im, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.im$CC.Difference <- data.im$S.Score - data.im$G2M.Score
+data.im <- SCTransform(data.im, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+#data.im <- ScaleData(data.im, vars.to.regress = "CC.Difference", features = rownames(data.im))
+data.im <- RunPCA(data.im, features = data.im@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.im <- RunUMAP(data.im, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+#data.im <- ScaleData(data.im, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(data.im))
+
+```
+
+
+```{r}
+# WT
+data.wt <- CellCycleScoring(data.wt, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.wt$CC.Difference <- data.wt$S.Score - data.wt$G2M.Score
+data.wt <- SCTransform(data.wt, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+#data.wt <- ScaleData(data.wt, vars.to.regress = "CC.Difference", features = rownames(data.wt))
+data.wt <- RunPCA(data.wt, features = data.wt@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.wt <- RunUMAP(data.wt, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+#data.wt <- ScaleData(data.wt, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(data.im))
+
+
+```
+
+
+
+
+## Unsupervised analysis
+```{r,fig.height=4, fig.width= 10}
+
+data.im <- FindNeighbors(data.im,assay  = "SCT", dims = 1:20)
+data.im <- FindClusters(data.im, resolution = 0.7)
+data.im <- FindClusters(data.im, resolution = 0.5)
+data.im <- FindClusters(data.im, resolution = 0.4)
+data.im <- FindClusters(data.im, resolution = 0.3)
+
+data.wt <- FindNeighbors(data.wt,assay  = "SCT", dims = 1:20)
+data.wt <- FindClusters(data.wt, resolution = 0.7)
+data.wt <- FindClusters(data.wt, resolution = 0.5)
+data.wt <- FindClusters(data.wt, resolution = 0.4)
+data.wt <- FindClusters(data.wt, resolution = 0.3)
+
+a <- DimPlot(data.wt,group.by = "SCT_snn_res.0.3",label = T)
+b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.3",label = T)
+a + b
+```
+

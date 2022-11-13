@@ -16,6 +16,7 @@ library(ggplot2)
 library(patchwork)
 library(SeuratDisk)
 library(ProjecTILs)
+library(glmGamPoi)
 source("./utils.R")
 ```
 # TO DO ##########
@@ -25,7 +26,7 @@ source("./utils.R")
 # VER SI DA MÁS CONSISTENTE EL ANÁLISIS. 
 
 Capture Variable feautures from Azimuth reference:
-```{r,warning=F, collapse =T,message =F}
+```{r}
 outfile <- "~/Dropbox/Amezcua/data/pbmc_multimodal.h5seurat"
 if(file.exists(outfile)){download = F}
 if(download){
@@ -36,14 +37,14 @@ if(download){
 }
 bref <- subset(reference,celltype.l1=="B") 
 bref <- FindVariableFeatures(bref, assay = "SCT", selection.method = "vst", nfeatures = 800 , verbose = FALSE)
-
+bref%>%rownames()%>%
 
 bref.hvgs.mm <- subset(ProjecTILs::Hs2Mm.convert.table,Gene.HS %in% bref@assays$SCT@var.features)$Gene.MM
 bref.hvgs.mm <- setdiff(bref.hvgs.mm,scGate::genes.blacklist.default$Mm)
 ```
 
 # compute Important genes spliting categories
-```{r,warning=F, collapse =T,message =F}
+```{r}
 bref$celltype.l2%>%table
 bref2 <- bref%>%subset(celltype.l2 %in% c("B intermediate", "B naive", "B memory"))
 Idents(bref2) <- "celltype.l2"
@@ -71,80 +72,226 @@ DimPlot(object = bref, reduction = "wnn.umap", group.by = "celltype.l3", label =
 
 # Compute new umap space based on reference variable features
 ```{r}
+ndim = 30; seed = 31416
 panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
 data <- readRDS(panBellFile)
 data%>%dim
 data <- data%>%subset(panBcell2HR == "Pure")
 data%>%dim
 
-ndim = 30; seed = 31416
-data.dp2 <- NormalizeData(data, verbose = TRUE)
-compute.hvgs <- T
-if(compute.hvgs){
-  data.dp2 <- FindVariableFeatures(data.dp2, selection.method = "vst", nfeatures = 800 , verbose = FALSE)
-  data.dp2@assays$RNA@var.features <-  setdiff(data.dp2@assays$RNA@var.features,scGate::genes.blacklist.default$Mm)
-}else{
-  data.dp2@assays$RNA@var.features <-  intersect(bref.hvgs.mm,data.dp2%>%rownames())
-}
-data.dp2 <- ScaleData(data.dp2, verbose = TRUE)
-data.dp2 <- RunPCA(data.dp2, features = data.dp2@assays$RNA@var.features,
+data.wt <- data%>%subset(orig.ident == "DS-017-WT")
+data.im <- data%>%subset(orig.ident != "DS-017-WT")
+```
+
+Cell cycle    
+```{r}
+s.genes <- cc.genes$s.genes%>%hs.2.mm(.)
+g2m.genes <- cc.genes$g2m.genes%>%hs.2.mm(.)
+
+data.im <- CellCycleScoring(data.im, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+data.im$CC.Difference <- data.im$S.Score - data.im$G2M.Score
+
+data.im <- SCTransform(data.im, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
+#data.im <- ScaleData(data.im, vars.to.regress = "CC.Difference", features = rownames(data.im))
+
+data.im <- RunPCA(data.im, features = data.im@assays$RNA@var.features,
                 ndims.print = 1:5, nfeatures.print = 5)
-data.dp2 <- RunUMAP(data.dp2, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 30)
+data.im <- RunUMAP(data.im, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+#data.im <- ScaleData(data.im, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(data.im))
+```
+
+
+## Unsupervised analysis
+```{r}
+data.wt <- FindNeighbors(data.wt, dims = 1:20)
+data.wt <- FindClusters(data.wt, resolution = 0.5)
+
+data.im <- FindNeighbors(data.im,assay  = "SCT", dims = 1:20)
+data.im <- FindClusters(data.im, resolution = 0.5)
+
+DimPlot(data.wt,group.by = "seurat_clusters",label = T)
+DimPlot(data.im ,group.by = "seurat_clusters",label = T)
+```
+
+# Supervised analysis with SingleR
+```{r}
+library(SingleR)
+#ref.se$label.fine%>%table()
+run =T
+if(run){
+  ref.se <- celldex::ImmGenData()
+  param <- BiocParallel::MulticoreParam(workers = 32)
+  
+  ref.se.bcell = ref.se[,ref.se$label.main%>%grepl("B c",.)]
+  ## broad 
+  result.singler.main = SingleR(test = GetAssayData(data.wt), ref = ref.se.bcell, labels = ref.se.bcell$label.main%>%grep("B",.,value=T), BPPARAM=param)
+  data.wt.singler <- AddMetaData(data.wt, metadata = result.singler.main$pruned.labels,col.name = "SingleR.main")
+
+  ## finer
+  result.singler.fine = SingleR(test = GetAssayData(data.wt), ref = ref.se.bcell, labels = ref.se.bcell$label.fine, BPPARAM=param)
+  data.wt.singler <- AddMetaData(data.wt.singler, metadata = result.singler.fine$pruned.labels,col.name = "SingleR.fine")
+  
+  # finer (ontology based)
+  result.singler = SingleR(test = GetAssayData(data.wt), ref = ref.se.bcell,labels = ref.se.bcell$label.ont, BPPARAM=param)
+  # get term names
+  cl <- ontoProc::getCellOnto()
+  terms <- result.singler$pruned.labels%>%unique()
+  getTerms <- ontoProc::label_TAG(ontology = cl,terms)
+  data.wt.singler <- AddMetaData(data.wt.singler, metadata = result.singler$pruned.labels,col.name = "SingleR.tag")
+  data.wt.singler <- AddMetaData(data.wt.singler, metadata = unname(getTerms[result.singler$pruned.labels]),col.name = "SingleR.term")
+}
 
 ```
 
 
+```{r}
+run =T
+if(run){
+  ref.se.bcell = ref.se[,ref.se$label.main%>%grepl("B c",.)]
+  ## broad 
+  result.singler.main = SingleR(test = GetAssayData(data.im,assay = "RNA"), ref = ref.se.bcell, labels = ref.se.bcell$label.main%>%grep("B",.,value=T), BPPARAM=param)
+  data.im.singler <- AddMetaData(data.im, metadata = result.singler.main$pruned.labels,col.name = "SingleR.main")
+
+  ## finer
+  result.singler.fine = SingleR(test = GetAssayData(data.im,assay = "RNA"), ref = ref.se.bcell, labels = ref.se.bcell$label.fine, BPPARAM=param)
+  data.im.singler <- AddMetaData(data.im.singler, metadata = result.singler.fine$pruned.labels,col.name = "SingleR.fine")
+  
+  # finer (ontology based)
+  result.singler = SingleR(test = GetAssayData(data.im,assay = "RNA"), ref = ref.se.bcell,labels = ref.se.bcell$label.ont, BPPARAM=param)
+  # get term names
+  cl <- ontoProc::getCellOnto()
+  terms <- result.singler$pruned.labels%>%unique()
+  getTerms <- ontoProc::label_TAG(ontology = cl,terms)
+  data.im.singler <- AddMetaData(data.im.singler, metadata = result.singler$pruned.labels,col.name = "SingleR.tag")
+  data.im.singler <- AddMetaData(data.im.singler, metadata = unname(getTerms[result.singler$pruned.labels]),col.name = "SingleR.term")
+}
+
+```
+
+
+# visualize SingleR classification
+
+## TO DO, reahacer cluster por ontologia sólo en Bcells y Plasma Cells. 
+```{r,fig.height= 5,fig.width= 10}
+#DimPlot(seurat.merged.processed,group.by = "SingleR.main") +  
+
+#(DimPlot(data.wt.singler,group.by = "SingleR.main")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+(DimPlot(data.wt.singler,group.by = "SingleR.fine")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+(DimPlot(data.wt.singler,group.by = "SingleR.term")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+
+(DimPlot(data.im.singler,group.by = "SingleR.fine")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+(DimPlot(data.im.singler,group.by = "SingleR.term")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+
+
+# WT
+data.wt <- NormalizeData(data.wt, verbose = TRUE)
+compute.hvgs <- T
+if(compute.hvgs){
+  data.wt <- FindVariableFeatures(data.wt, selection.method = "vst", nfeatures = 800 , verbose = FALSE)
+  data.wt@assays$RNA@var.features <-  setdiff(data.wt@assays$RNA@var.features,scGate::genes.blacklist.default$Mm)
+}else{
+  data.wt@assays$RNA@var.features <-  intersect(bref.hvgs.mm,data.wt%>%rownames())
+}
+data.wt <- ScaleData(data.wt, verbose = TRUE)
+data.wt <- RunPCA(data.wt, features = data.wt@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.wt <- RunUMAP(data.wt, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+# IM
+data.im <- NormalizeData(data.im, verbose = TRUE)
+compute.hvgs <- T
+if(compute.hvgs){
+  data.im <- FindVariableFeatures(data.im, selection.method = "vst", nfeatures = 800 , verbose = FALSE)
+  data.im@assays$RNA@var.features <-  setdiff(data.im@assays$RNA@var.features,scGate::genes.blacklist.default$Mm)
+}else{
+  data.im@assays$RNA@var.features <-  intersect(bref.hvgs.mm,data.im%>%rownames())
+}
+data.im <- ScaleData(data.im, verbose = TRUE)
+data.im <- RunPCA(data.im, features = data.im@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5)
+data.im <- RunUMAP(data.im, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+```
+
+
+```{r,fig.height= 12,fig.width=6}
+discrim.wt <- FindAllMarkers(data.wt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+gene.wt <- discrim.wt$gene
+DoHeatmap(data.wt,features = gene.wt)
+
+discrim.im <- FindAllMarkers(data.im,assay = "SCT", only.pos = TRUE, min.pct = 0.40, logfc.threshold = 0.25)
+gene.im <- discrim.im$gene
+DoHeatmap(data.im%>%subset(seurat_clusters%in%c(0:9)),features = gene.im,size = 3,lines.width = 35)
+#DoHeatmap(data.im%>%subset(seurat_clusters%in%c(0:9)),features = features)
+
+```
+
 
 # Explore some markers among defined celltypes
+```{r,fig.height=15,fig.width=12}
+features = c("Ighm","Ighd1-1","Igha","Ighg1","Cd19","Ms4a1","Fcer2a","Cd24a","Cd38","Pdcd1lg2","Nt5e","Entpd1","Cd80","Cd86","Cd93","Cd69","Itgal","Cd44","Cd28","Sdc1",	"Prdm1","Tnfrsf17","Sell","Igj")
+FeaturePlot(data.wt,features = features, ncol = 5)
+#data.dp2%>%rownames()%>%grep("Cd28",.,value=T)
+```
+
+
+
+
+
 
 ## Plasmáticas residentes IgA+
 ```{r,fig.width= 12,fig.height=8}
-FeaturePlot(data.dp2,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
+FeaturePlot(data.im,features = c("Sdc1","Igha","Prdm1","Tnfrsf17","Cd28","Igj","Cd93"),ncol = 4)
 ```
 
 
 ```{r,fig.height=7,fig.width=10}
 plasm.resid.1 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Cd3e-;Cd3d-;Cd4-;Cd8a-")
-data.dp2 <- scGate(data = data.dp2, model = plasm.resid.1, output.col.name = "plasm.resid.1")
+data.im <- scGate(data = data.im, model = plasm.resid.1, output.col.name = "plasm.resid.1")
 
 plasm.resid.2 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1")
-data.dp2 <- scGate(data = data.dp2, model = plasm.resid.2, output.col.name = "plasm.resid.2")
+data.im <- scGate(data = data.im, model = plasm.resid.2, output.col.name = "plasm.resid.2")
 
 plasm.resid.3 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17")
-data.dp2 <- scGate(data = data.dp2, model = plasm.resid.3, output.col.name = "plasm.resid.3")
+data.im <- scGate(data = data.im, model = plasm.resid.3, output.col.name = "plasm.resid.3")
 
 plasm.resid.4 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17;Igj")
-data.dp2 <- scGate(data = data.dp2, model = plasm.resid.4, output.col.name = "plasm.resid.4")
+data.im <- scGate(data = data.im, model = plasm.resid.4, output.col.name = "plasm.resid.4")
 
 plasm.resid.5 <- scGate::gating_model(name = "plasmaticas_residentes", signature = "Sdc1;Igha;Prdm1;Tnfrsf17;Igj;Cd28")
-data.dp2 <- scGate(data = data.dp2, model = plasm.resid.5, output.col.name = "plasm.resid.5")
+data.im <- scGate(data = data.im, model = plasm.resid.5, output.col.name = "plasm.resid.5")
 
 
-p1 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.1" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
-  labs(subtitle =  "Cd138+ Igha+",caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.1=="Pure")))
+p1 <- DimPlot(data.im, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.1" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+",caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.1=="Pure")))
 
-p2 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.2" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
-  labs(subtitle =  "Cd138+ Igha+ Blimp-1", caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.2=="Pure")))
+p2 <- DimPlot(data.im, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.2" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1", caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.2=="Pure")))
 
-p3 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.3" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
-  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+",caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.3=="Pure")))
+p3 <- DimPlot(data.im, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.3" ) + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+",caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.3=="Pure")))
 
-p4 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.4") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
-  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+",caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.4=="Pure")))
+p4 <- DimPlot(data.im, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.4") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+",caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.4=="Pure")))
 
-p5 <- DimPlot(data.dp2, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.5") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
-  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+ Cd28+", caption = sprintf("Ncells: %s",sum(data.dp2$plasm.resid.5=="Pure")))
+p5 <- DimPlot(data.im, cols = c(list(Impure = "gray", Pure = "green")), group.by = "plasm.resid.5") + theme(aspect.ratio = 1) + ggtitle("plasma resid") + 
+  labs(subtitle =  "Cd138+ Igha+ Blimp-1+ BCMA+ Igj+ Cd28+", caption = sprintf("Ncells: %s",sum(data.im$plasm.resid.5=="Pure")))
 
 wrap_plots(list(p1,p2,p3,p4,p5))
 ```
 
 
-## Explore all involved markers
-```{r,fig.height=15,fig.width=12}
-features = c("Ighm","Ighd1-1","Igha","Ighg1","Cd19","Ms4a1","Fcer2a","Cd24a","Cd38","Pdcd1lg2","Nt5e","Entpd1","Cd80","Cd86","Cd93","Cd69","Itgal","Cd44","Cd28","Sdc1",	"Prdm1","Tnfrsf17","Sell","Igj")
-FeaturePlot(data.dp2,features = features,ncol = 5)
-data.dp2%>%rownames()%>%grep("Cd28",.,value=T)
-```
+
 
 
 

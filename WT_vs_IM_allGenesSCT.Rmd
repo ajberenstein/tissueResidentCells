@@ -11,7 +11,7 @@ output:
 knit: (function(input_file, encoding) {
   out_dir <- 'docs';
   rmarkdown::render(input_file, encoding=encoding,
- output_file=file.path(dirname(input_file), out_dir, 'explore_cluster_signatures_v05172022.html'))})
+ output_file=file.path(dirname(input_file), out_dir, 'explore_cluster_signatures_v05092022.html'))})
 ---
 
 
@@ -49,12 +49,7 @@ data.im <- data%>%subset(orig.ident != "DS-017-WT")
 
 Visualize datasets by condition
 ```{r,fig.width=6,fig.height=3,warning=F, collapse =T,message =F}
-fig2 <- DimPlot(data,group.by = "orig.ident",split.by = "orig.ident")
-ggsave("plots/fig2_panBcell.pdf",plot = fig2,width = 12, height = 4)
-ggsave("plots/fig2_panBcell.png",plot = fig2,width = 12, height = 4)
-ggsave("plots/fig2_panBcell.tiff",plot = fig2,width = 12, height = 4)
-fig2
-
+DimPlot(data,group.by = "orig.ident",split.by = "orig.ident")
 ```
 
 # Preprocessing
@@ -92,12 +87,19 @@ set.seed(seed)
 
 data.im <- CellCycleScoring(data.im, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
 data.im$CC.Difference <- data.im$S.Score - data.im$G2M.Score
+data.im.all <- data.im  # make a copy 
 
 # work as usual (only variable genes)
 data.im <- SCTransform(data.im, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE)
 data.im <- RunPCA(data.im, features = data.im@assays$RNA@var.features,
                 ndims.print = 1:5, nfeatures.print = 5)
 data.im <- RunUMAP(data.im, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
+
+# work with all genes
+data.im.all <-  SCTransform(data.im.all, method = "glmGamPoi", vars.to.regress = c("percent.mito","CC.Difference"), verbose = FALSE,return.only.var.genes = FALSE)
+data.im.all <- RunPCA(data.im.all, features = data.im.all@assays$RNA@var.features,
+                ndims.print = 1:5, nfeatures.print = 5,assay = )
+data.im.all <- RunUMAP(data.im.all, reduction = "pca", dims = 1:ndim, seed.use=seed, n.neighbors = 20)
 
 
 ```
@@ -113,12 +115,22 @@ data.im <- FindNeighbors(data.im,assay  = "SCT", dims = 1:20)
 data.im <- FindClusters(data.im, resolution = 0.7)
 data.im <- FindClusters(data.im, resolution = 0.5)
 data.im <- FindClusters(data.im, resolution = 0.4)
-data.im <- FindClusters(data.im, resolution = 0.3)
+set.seed(seed)
+data.im <- FindClusters(data.im, resolution = 0.3,seed = seed)
+
+
+set.seed(seed)
+data.im.all <- FindNeighbors(data.im.all,assay  = "SCT", dims = 1:20, seed = seed)
+data.im.all <- FindClusters(data.im.all, resolution = 0.5)
+data.im.all <- FindClusters(data.im.all, resolution = 0.4)
+data.im.all <- FindClusters(data.im.all, resolution = 0.32)
+data.im.all <- FindClusters(data.im.all, resolution = 0.35)
+data.im.all <- FindClusters(data.im.all, resolution = 0.3)
 
 
 set.seed(seed)
 data.wt <- FindNeighbors(data.wt,assay  = "SCT", dims = 1:20)
-#data.wt <- FindClusters(data.wt, resolution = 2)
+data.wt <- FindClusters(data.wt, resolution = 3)
 data.wt <- FindClusters(data.wt, resolution = 1.5)
 data.wt <- FindClusters(data.wt, resolution = 1)
 data.wt <- FindClusters(data.wt, resolution = 0.9)
@@ -134,93 +146,37 @@ data.wt <- FindClusters(data.wt, resolution = 0.5)
 data.wt <- FindClusters(data.wt, resolution = 0.4)
 data.wt <- FindClusters(data.wt, resolution = 0.3)
 
-a <- DimPlot(data.wt,group.by = "SCT_snn_res.0.8",label = T)
-b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.3",label = T)
+a <- DimPlot(data.wt,group.by = "SCT_snn_res.0.8",label = T) + ggtitle("WT") #
+b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.3",label = T) + ggtitle("IMs")#
+cc <- DimPlot(data.im.all ,group.by = "SCT_snn_res.0.35",label = T)
 
 a + b
 
-```
-
-## Explore and remove outliers
-```{r,eval =F, results=F,echo =F}
-#(data.im%>%subset(SCT_snn_res.0.3 == 1))$nCount_RNA%>%hist(breaks = 25)  # It seems like a bimodal distribution and a good split point could be around ncount = 1200
-#data.im$nCount_RNA%>%quantile(0.95)
-#data.im$nCount_RNA%>%quantile(0.9)
-(data.im%>%subset(SCT_snn_res.0.3 == 1))$nFeature_RNA%>%hist(breaks = 25)  # It seems like a bimodal distribution and a good split point could be around ncount = 1200
-
-```
-
-
-```{r,warning=F, collapse =T,message =F}
-## Remove outliers WT
-q = 0.95
-thr.wt = quantile(data.wt$nCount_RNA,q)
-thr.wt.feat = quantile(data.wt$nFeature_RNA,q)
-outl.wt <- data.wt%>%subset(nCount_RNA>=thr.wt | nFeature_RNA>=thr.wt.feat)
-clean.wt <- data.wt%>%subset(nCount_RNA<thr.wt & nFeature_RNA<thr.wt.feat)
-
-## Remove outliers IM
-q = 0.95
-thr.im = quantile(data.im$nCount_RNA,q)
-thr.im.feat = quantile(data.im$nFeature_RNA,q)
-outl.im <- data.im%>%subset(nCount_RNA>=thr.im | nFeature_RNA>=thr.im.feat)
-clean.im <- data.im%>%subset(nCount_RNA<thr.im & nFeature_RNA<thr.im.feat)
-
+table(data.im$SCT_snn_res.0.3,data.im.all$SCT_snn_res.0.32)
 ```
 
 ```{r}
-thr.im; thr.im.feat
-outl.im$SCT_snn_res.0.4%>%table()
-data.im$SCT_snn_res.0.4%>%table()
+table(data.im$SCT_snn_res.0.3,data.im.all$SCT_snn_res.0.35)
 ```
 
-
-```{r,eval =F,echo =F, results=F}
-thr.wt; thr.wt.feat
-outl.wt$SCT_snn_res.0.8%>%table()
-data.wt$SCT_snn_res.0.8%>%table()
-
-thr.im; thr.im.feat
-outl.im$SCT_snn_res.0.4%>%table()
-data.im$SCT_snn_res.0.4%>%table()
-
-```
-
-
-```{r,eval =F,fig.width= 8,fig.height=4}
-aa <- DimPlot(outl.wt ,group.by = "SCT_snn_res.0.8",label = T) + ggtitle("wt outliers q=0.95; res = 0.8")
-bb <- DimPlot(outl.im ,group.by = "SCT_snn_res.0.4",label = T) + ggtitle("IM outliers q = 0.95; res = 0.4")
-aa + bb
-```
-
-
-```{r,eval =F,fig.width= 8,fig.height=4}
-
-aa <- DimPlot(clean.wt ,group.by = "SCT_snn_res.0.8",label = T) 
-bb <- DimPlot(clean.im ,group.by = "SCT_snn_res.0.4",label = T) 
-fig3 <- aa + bb
-ggsave("plots/fig3_clustering_wt_im.pdf",plot = fig3,width = 8, height = 4)
-ggsave("plots/fig3_clustering_wt_im.png",plot = fig3,width = 8, height = 4)
-ggsave("plots/fig3_clustering_wt_im.tiff",plot = fig3,width = 8, height = 4)
-fig3
-
-```
 ```{r}
-data.wt <- clean.wt
-data.im <- clean.im
+discrim.wt025[!discrim.wt025$gene %in% discrim.wt$gene,]
 ```
 
-# Marker analysis
+
+
 
 ```{r,fig.height= 20,fig.width=10,warning=F, collapse =T,message =F}
 Idents(data.wt) <- "SCT_snn_res.0.8"
+discrim.wt2525 <- FindAllMarkers(data.wt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
 discrim.wt <- FindAllMarkers(data.wt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.15)
 discrim.wt <- discrim.wt%>%subset(p_val_adj < 0.05)
 gene.wt <- discrim.wt$gene
 d <- DoHeatmap(data.wt,features = gene.wt)
 
-Idents(data.im) <- "SCT_snn_res.0.4"
-discrim.im <- FindAllMarkers(data.im,assay = "SCT", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.15)
+Idents(data.im) <- "SCT_snn_res.0.3"
+discrim.im4025 <- FindAllMarkers(data.im,assay = "SCT", only.pos = T, min.pct = 0.40, logfc.threshold = 0.25)
+discrim.im <- FindAllMarkers(data.im,assay = "SCT", only.pos = T, min.pct = 0.25, logfc.threshold = 0.15)
 discrim.im.uncorrected <- discrim.im
 discrim.im <- discrim.im%>%subset(p_val_adj < 0.05)
 
@@ -228,62 +184,47 @@ gene.im <- discrim.im$gene
 
 e <- DoHeatmap(data.im,features = gene.im,size = 3,lines.width = 35)
 
+#Idents(data.im.all) <- "SCT_snn_res.0.35"
+#discrim.im.all <- FindAllMarkers(data.im.all,assay = "SCT", only.pos = T, min.pct = 0.40, logfc.threshold = 0.20)
+#gene.im.all <- discrim.im.all$gene
+#f <- DoHeatmap(data.im.all,features = gene.im.all,size = 3,lines.width = 35)
+
 # show WT heatmap
 d 
 
 # show IM heatmap
 e 
+
+# show IM heatmap all genes
+#f 
+```
+
+```{r}
+discrim.wt%>%head(10)
 ```
 
 
-```{r,eval = F}
-ggsave(d,file = "~/repos/ajberenstein/tissueResidentCells/docs/heatmap_fdr005.wt.png",height = 20,width = 10, dpi = 300)
-ggsave(d,file = "~/repos/ajberenstein/tissueResidentCells/docs/heatmap_fdr005.wt.pdf",height = 20,width = 10,dpi = 300)
-write.table(discrim.wt,file = "~/repos/ajberenstein/tissueResidentCells/docs/makers_fdr005.wt.tsv",sep = "\t",quote =F,row.names =F)
-
-ggsave(e,file = "~/repos/ajberenstein/tissueResidentCells/docs/heatmap_fdr005.im.png",height = 20,width = 10,dpi = 300)
-ggsave(e,file = "~/repos/ajberenstein/tissueResidentCells/docs/heatmap_fdr005.im.pdf",height = 20,width = 10,dpi = 300)
-write.table(discrim.im,file = "~/repos/ajberenstein/tissueResidentCells/docs/makers_fdr005.im.tsv",sep = "\t",quote =F,row.names =F)
-
-# 
-discrim.wt.down <- FindAllMarkers(data.wt, only.pos = FALSE, min.pct = 0.25, logfc.threshold = 0.15)
-discrim.wt.down <- discrim.wt.down%>%subset(p_val_adj < 0.05)
-write.table(discrim.wt.down,file = "~/repos/ajberenstein/tissueResidentCells/docs/makers_fdr005.wt_include_downReg.tsv",sep = "\t",quote =F,row.names =F)
-
-
-discrim.im.down <- FindAllMarkers(data.im, only.pos = FALSE, min.pct = 0.25, logfc.threshold = 0.15)
-discrim.im.down <- discrim.im.down%>%subset(p_val_adj < 0.05)
-write.table(discrim.im.down,file = "~/repos/ajberenstein/tissueResidentCells/docs/makers_fdr005.im_include_downReg.tsv",sep = "\t",quote =F,row.names =F)
-
-
-```
-
-
-
-```{r,eval=F,echo=F,results=F}
+```{r}
 discrim.im$cluster%>%table()
 discrim.im%>%head((discrim.im$cluster%>%table())["0"])
 discrim.im4025%>%subset(cluster==5)
 ```
 
-```{r,eval=F,echo=F,results=F}
 # Control de daños sobre los clusters
+```{r}
 # WT
-scaled_genes <- data.wt@assays$SCT@scale.data%>%rownames()
 df <- data.frame()
 for(ncl in discrim.wt$cluster%>%unique()){
 
   common_genes <- intersect( (discrim.wt2525%>%subset(cluster ==ncl))$gene,
              (discrim.wt%>%subset(cluster ==ncl))$gene
   )
-  common_genes <- intersect(common_genes,scaled_genes)
   common_genes <- common_genes%>%paste(., collapse = "|")
   
   # Que genes diferencialment expresados perdió el nuevo cluster 
   lossed_genes <- setdiff( (discrim.wt2525%>%subset(cluster ==ncl))$gene,
              (discrim.wt%>%subset(cluster ==ncl))$gene
   )
-  lossed_genes <- intersect(lossed_genes,scaled_genes)
   lossed_genes <- lossed_genes%>%paste(., collapse = "|")
   
   
@@ -291,34 +232,30 @@ for(ncl in discrim.wt$cluster%>%unique()){
   new_genes <- setdiff( (discrim.wt%>%subset(cluster ==ncl))$gene,
              (discrim.wt2525%>%subset(cluster ==ncl))$gene
   )
-  new_genes <- intersect(new_genes,scaled_genes)
   new_genes <- new_genes%>%paste(., collapse = "|")
 
   df <- rbind(df,c(common_genes,lossed_genes,new_genes))
 }
 colnames(df) <- c("common","lossed","new")
 df$cluster <- discrim.wt$cluster%>%unique()
+df
 write.table(df,"~/Dropbox/enrichment_diff_wt.tsv",quote =F,row.names =F,sep = "\t")
 
 
 
 ## IM
-scaled_genes <- data.im@assays$SCT@scale.data%>%rownames()
 df <- data.frame()
 for(ncl in discrim.im$cluster%>%unique()){
 
   common_genes <- intersect( (discrim.im4025%>%subset(cluster ==ncl))$gene,
              (discrim.im%>%subset(cluster ==ncl))$gene
   )
-
-  common_genes <- intersect(common_genes,scaled_genes)
   common_genes <- common_genes%>%paste(., collapse = "|")
   
   # Que genes diferencialment expresados perdió el nuevo cluster 
   lossed_genes <- setdiff( (discrim.im4025%>%subset(cluster ==ncl))$gene,
              (discrim.im%>%subset(cluster ==ncl))$gene
   )
-  lossed_genes <- intersect(lossed_genes,scaled_genes)
   lossed_genes <- lossed_genes%>%paste(., collapse = "|")
   
   
@@ -326,7 +263,6 @@ for(ncl in discrim.im$cluster%>%unique()){
   new_genes <- setdiff( (discrim.im%>%subset(cluster ==ncl))$gene,
              (discrim.im4025%>%subset(cluster ==ncl))$gene
   )
-  new_genes <- intersect(new_genes,scaled_genes)
   new_genes <- new_genes%>%paste(., collapse = "|")
 
   df <- rbind(df,c(common_genes,lossed_genes,new_genes))
@@ -339,10 +275,6 @@ write.table(df,"~/Dropbox/enrichment_diff_im.tsv",quote =F,row.names =F,sep = "\
 
 
 
-```
-
-```{r}
-sum(data.im$nCount_RNA>1500)
 ```
 
 # DimPlot using Heatmap genes
@@ -362,6 +294,7 @@ FeaturePlot(data.wt,features = discrim.wt$gene,ncol = 5)
 
 IM dataset
 ```{r,fig.width= 20,fig.height=70,warning=F, collapse =T,message =F}
+#FeaturePlot(data.im.all,features = intersect(discrim.im$gene,data.im%>%rownames()),ncol = 5)
 FeaturePlot(data.im,features = intersect(discrim.im$gene,data.im%>%rownames()),ncol = 6)
 ```
 

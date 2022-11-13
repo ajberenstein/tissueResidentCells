@@ -37,3 +37,14 @@ convertHumanGeneList <- function(x){
   print(head(humanx))
   return(humanx)
 }
+
+hs.2.mm <- function(hs,keep.na =F){
+  if(!keep.na){
+    mm <- subset(ProjecTILs::Hs2Mm.convert.table,Gene.HS %in% hs)$Gene.MM
+  }else{
+    tt <- ProjecTILs::Hs2Mm.convert.table
+    ii <- match(hs,tt$Gene.HS)
+    mm <- (tt[ii,])$Gene.MM
+  }
+  return(mm)
+}

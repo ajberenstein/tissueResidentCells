@@ -1,0 +1,311 @@
+---
+title: "Semi-Supervised STACAS demo"
+author: "A. Berenstein, C.Amezcua"
+date: "15/01/2022"
+output:
+  rmdformats::readthedown:
+    self-contained: true
+    highlight: haddock
+    thumbnails: false
+    css: styles.css
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file, encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'PanBcellDef.html'))})
+---
+
+# Introduction 
+This notebook will work on data produced by Amezcua et al. (Cell 2019)
+In that work, Amezcua analyzed tissue resident Th cells. 
+Now, the idea is to recycle those data but redirecting the focus on Bcells. In particular, those tissue resident ones. 
+
+
+```{r}
+renv::activate()
+renv::restore()
+#install.packages("Seurat")
+#install.packages("remotes")
+#remotes::install_github("carmonalab/UCell")
+#remotes::install_github("carmonalab/scGate")
+#install.packages("BiocManager")
+#BiocManager::install("SingleR")
+#BiocManager::install("celldex")
+#BiocManager::install("ontoProc")
+#BiocManager::install("rmarkdown")
+
+library("Seurat")
+library("dplyr")
+library("UCell")
+library("scGate")
+library("SingleR")
+library("ggplot2")
+source("./utils.R")
+
+```
+
+# Load datasets from counts
+```{r}
+path <- c("~/Dropbox/Amezcua/data/")
+samples <- c("DS-017-WT","DS-017-Im1","DS-017-Im2")
+count_files <- paste(path,samples,"gene_exon_tagged_dge.txt.gz",sep = "/")
+
+# Output files:
+processed_annotated_file <- "~/Dropbox/Amezcua/processed_data/seurat.merged.processed.rds"
+bcells.file <- "~/Dropbox/Amezcua/processed_data/testing.bcells.rds"   # Similar to processed annotated file but containing some scGate bcell maker annotations
+panBellFile <-  "~/Dropbox/Amezcua/processed_data/PanBcellSubset.rds"  # Subseted Pan Bcell FIle with recomputed UMAP
+```
+
+## Load proccessed object
+```{r}
+if(file.exists(processed_annotated_file)){
+  run =F
+  seurat.merged.processed <- readRDS(processed_annotated_file)  
+}else{
+  run =T
+}
+
+```
+
+
+#create Seurat objects
+```{r}
+if(run){
+  seuratDataList <- list()
+  for(i in seq_along(samples)){
+    countdata <- read.table(
+      file = count_files[i],
+      header = T,
+      row.names = 1
+    )
+      
+    obj <- Seurat::CreateSeuratObject(counts = countdata,project = samples[i])
+    seuratDataList[[i]] <- obj
+  }
+  ncell <- table(unlist(sapply(seuratDataList,colnames)))
+  to.drop <- names(ncell[ncell>1])
+  
+  # remove 4 barcodes duplicated across samples
+  seuratDataList = lapply(seuratDataList,function(x){
+    res = subset(x,cells = setdiff(colnames(x),to.drop) )
+    return(res)
+  })
+}
+```
+
+
+# quality filtering
+```{r,fig.height= 8,fig.width= 13}
+if(run){
+  seurat.merged <- Reduce(merge, seuratDataList)
+  seurat.merged@meta.data%>%head()
+  
+  percent.ribo.dv <- PercentageFeatureSet(seurat.merged, pattern = "^Rp[ls]")
+  percent.mito.dv <- PercentageFeatureSet(seurat.merged, pattern = "^mt-")
+  
+  seurat.merged <- AddMetaData(seurat.merged, metadata = percent.ribo.dv, col.name = "percent.ribo")
+  seurat.merged <- AddMetaData(seurat.merged, metadata = percent.mito.dv, col.name = "percent.mito")
+Seurat::VlnPlot(seurat.merged,features = c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),group.by = "orig.ident",ncol = 2)
+}  
+```
+
+# Filter low or high expressed cells 
+```{r}
+if(run){
+  splited.by.sample <- SplitObject(seurat.merged, split.by = "orig.ident")
+  
+  splited.by.sample.qc <- lapply(splited.by.sample, function(x) {
+     #n UMIs
+     q <- quantile(x@meta.data$nCount_RNA, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99))
+     x <- subset(x, subset=nCount_RNA>max(q["10%"]) & nCount_RNA<q['99%']) 
+     
+     #n genes
+     q <- quantile(x@meta.data$nFeature_RNA, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99))
+     x <- subset(x, subset=nFeature_RNA>max(q['10%']) & nFeature_RNA < q['99%'])
+     
+     #% ribo
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+     x <- subset(x, subset=percent.ribo>q['1%'] & percent.ribo < min(50,q['99%']) )
+     
+     #% mito
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.9,0.95,0.98,0.99),na.rm =T)
+     x <- subset(x, subset=percent.mito < q['99%'])
+     return(x)
+  })
+  
+  seurat.filtered.merged <- Reduce(merge, splited.by.sample.qc)
+  dim(seurat.merged)
+  dim(seurat.filtered.merged)
+}else{
+  seurat.filtered.merged <- seurat.merged.processed
+}
+
+sapply(c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),function(x){summary(seurat.filtered.merged[[x]])})
+
+```
+
+## Control step: how many cells were dropped by high expression values? (Re: 262 cells)
+```{r}
+if(run){
+  high.expr.dropped <- lapply(splited.by.sample, function(x){
+     q <- quantile(x@meta.data$nCount_RNA, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99))
+     x_ncount <- subset(x, nCount_RNA>q['99%']) 
+     
+     #n genes
+     q <- quantile(x@meta.data$nFeature_RNA, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99))
+     x_nfeature <- subset(x, subset= nFeature_RNA > q['99%'])
+     
+     #% ribo
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99),na.rm =T)
+     x_ribo <- subset(x, subset=percent.ribo > min(50,q['99%']))
+     
+     #% mito
+     q <- quantile(x@meta.data$percent.ribo, c(0.01,0.02,0.05,0.1,0.5,0.9,0.95,0.98,0.99),na.rm =T)
+     x_mito <- subset(x, subset=percent.mito > q['99%'])
+     
+     return(table(c(x_ncount%>%colnames(), x_nfeature%>%colnames(),x_ribo%>%colnames(),x_ribo%>%colnames())))
+    }
+  )
+  
+  # 262 cells dropped by staying over the top 1% quantile in any of control quantity
+  cells.dropped.by.hihg.quantile <- unlist(high.expr.dropped)
+  cells.dropped.by.hihg.quantile%>%length()
+}
+```
+
+
+## Sanity check: visual detection of possible bach effects (Re: thats ok)
+```{r,fig.height= 4.5,fig.width= 12}
+ndim = 20      # for pca
+nfeat = 1000    # number of most variable features to be considered
+
+# scale data; find variable features, run pca and run umap
+if(run) seurat.merged.processed <- process_obj(seurat.filtered.merged,ndim = ndim, nfeat = nfeat, find_variable_features = T) 
+DimPlot(seurat.merged.processed,,split.by = "orig.ident")
+```
+
+# 7980 cells
+# 18.886 features 
+```{r}
+seurat.merged.processed
+```
+
+## run singleR
+```{r}
+if(run){
+  ref.se <- celldex::ImmGenData()
+  param <- BiocParallel::MulticoreParam(workers = 32)
+  
+  ## broad 
+  result.singler.main = SingleR(test = GetAssayData(seurat.merged.processed), ref = ref.se, labels = ref.se$label.main, BPPARAM=param)
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = result.singler.main$pruned.labels,col.name = "SingleR.main")
+  
+  # finer (ontology based)
+  result.singler = SingleR(test = GetAssayData(seurat.merged.processed), ref = ref.se,labels = ref.se$label.ont, BPPARAM=param)
+  # get term names
+  cl <- ontoProc::getCellOnto()
+  terms <- result.singler$pruned.labels%>%unique()
+  getTerms <- ontoProc::label_TAG(ontology = cl,terms)
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = result.singler$pruned.labels,col.name = "SingleR.tag")
+  seurat.merged.processed <- AddMetaData(seurat.merged.processed, metadata = unname(getTerms[result.singler$pruned.labels]),col.name = "SingleR.term")
+}
+
+```
+
+# visualize SingleR classification
+
+```{r,fig.height= 8,fig.width= 8}
+
+fig0 = DimPlot(seurat.merged.processed,group.by = "SingleR.main")   
+ggsave("plots/fig0_singleR.pdf",plot = fig0,width = 7, height = 7)
+ggsave("plots/fig0_singleR.png",plot = fig0,width = 7, height = 7)
+ggsave("plots/fig0_singleR.tiff",plot = fig0,width = 7, height = 7)
+fig0
+#(DimPlot(seurat.merged.processed,group.by = "SingleR.term")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+
+```
+
+
+## Clustering
+
+```{r}
+if(run){
+  set.seed(1234)
+  seurat.merged.processed <- FindNeighbors(seurat.merged.processed, dims = 1:20)
+  seurat.merged.processed <- FindClusters(seurat.merged.processed, resolution = 0.7)
+  saveRDS(seurat.merged.processed,file = processed_annotated_file)
+}
+DimPlot(seurat.merged.processed,group.by = "seurat_clusters",label = T)
+```
+
+```{r}
+
+if(file.exists(bcells.file)){
+  run.bcell.markers <- F
+  testing.bcells <- readRDS(bcells.file)
+}else{
+  run.bcell.markers <- T
+  testing.bcells <- seurat.merged.processed
+}
+
+```
+
+# Here We define our final gating model (panBcell2 which includes plasmatic resident cells)
+```{r, fig.height= 4, fig.width= 5}
+panBcell2 <- scGate::gating_model(name = "cd79", signature = "Cd79a")
+panBcell2 <- scGate::gating_model(panBcell2,name = "cd19", signature = "Cd19")
+panBcell2 <- scGate::gating_model(panBcell2, name = "cd20", signature = "Ms4a1")
+panBcell2 <- scGate::gating_model(panBcell2, name = "plasmaticas_residentes", signature = "Sdc1;Igha;Cd3e-;Cd3d-;Cd4-;Cd8a-")
+```
+
+
+```{r}
+testing.bcells <- scGate(data = testing.bcells, model = panBcell2, output.col.name = "panBcell2")
+#DimPlot(testing.bcells,group.by = "panBcell2")
+DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell2" ) + theme(aspect.ratio = 1) + ggtitle("panBcell2")
+
+```
+
+```{r}
+seurat.pan.Bcells <- seurat.merged.processed%>%subset(seurat_clusters %in% c(0,1,10,13,16,17,18))
+seurat.pan.Bcells <- process_obj(seurat.pan.Bcells ,ndim = 20, nfeat = 500, find_variable_features = T)
+set.seed(1234)
+seurat.pan.Bcells <- FindNeighbors(seurat.pan.Bcells, dims = 1:20)
+seurat.pan.Bcells$original_seurat_clusters <- seurat.pan.Bcells$seurat_clusters
+seurat.pan.Bcells <- FindClusters(seurat.pan.Bcells, resolution = 0.4)
+```
+
+```{r, fig.height= 4.5,fig.width= 11}
+A <- DimPlot(seurat.pan.Bcells, group.by = "original_seurat_clusters")
+seurat.pan.Bcells <- scGate(data = seurat.pan.Bcells, model = panBcell2, output.col.name = "panBcell2HR")
+B <- DimPlot(seurat.pan.Bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell2HR" ) + theme(aspect.ratio = 1) + ggtitle("panBcell2HR")
+A + B
+```
+
+## las panBcell2HR se construcyeron a partir de un modelo de scGate pero sobre un subset del dataset -filtrando los clusters con señal (0,1,10,13,16,17,18) --
+## Entonces para plotear sobre el dataset completo las HR, tenemos que matchearlas. Eso es lo que se hace en esta celda siguiente
+
+```{r}
+testing.bcells$panBcell2HR <- "Impure"
+aux <- rep("Impure",dim(testing.bcells)[2])
+names(aux) = testing.bcells@meta.data%>%rownames()
+panbcellhr = rownames(seurat.pan.Bcells@meta.data[seurat.pan.Bcells$panBcell2HR=="Pure",])
+aux[panbcellhr]<- "Pure"
+testing.bcells$panBcell2HR <- aux
+```
+
+
+# Plot Fig1
+```{r}
+fig1a <- DimPlot(testing.bcells,group.by = "seurat_clusters",label = T)
+fig1b <- DimPlot(testing.bcells,cols = c(list(Impure = "gray", Pure = "green")), group.by = "panBcell2HR" ) + theme(aspect.ratio = 1) + ggtitle("panBcell2HR")
+
+ggsave("plots/fig1a_clustering.pdf",plot = fig1a,width = 4.5, height = 4) 
+ggsave("plots/fig1a_clustering.png",plot = fig1a,width = 4.5, height = 4)
+ggsave("plots/fig1a_clustering.tiff",plot = fig1a,width = 4.5, height = 4)
+
+ggsave("plots/fig1b_PanBcell.pdf",plot = fig1b,width = 4.5, height = 4) 
+ggsave("plots/fig1b_PanBcell.png",plot = fig1b,width = 4.5, height = 4)
+ggsave("plots/fig1b_PanBcell.tiff",plot = fig1b,width = 4.5, height = 4)
+
+
+```

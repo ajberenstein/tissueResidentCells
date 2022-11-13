@@ -1,4 +1,21 @@
-# This notebook will work on data produced by Amezcua et al. (Cell 2019)
+---
+title: "Semi-Supervised STACAS demo"
+author: "A. Berenstein, C.Amezcua"
+date: "15/01/2022"
+output:
+  rmdformats::readthedown:
+    self-contained: true
+    highlight: haddock
+    thumbnails: false
+    css: styles.css
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file, encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'load_and_filter_data_Amezcua2019.html'))})
+---
+
+# Introduction 
+This notebook will work on data produced by Amezcua et al. (Cell 2019)
 In that work, Amezcua analyzed tissue resident Th cells. 
 Now, the idea is to recycle those data but redirecting the focus on Bcells. In particular, those tissue resident ones. 
 
@@ -87,8 +104,8 @@ if(run){
   
   seurat.merged <- AddMetaData(seurat.merged, metadata = percent.ribo.dv, col.name = "percent.ribo")
   seurat.merged <- AddMetaData(seurat.merged, metadata = percent.mito.dv, col.name = "percent.mito")
-}  
 Seurat::VlnPlot(seurat.merged,features = c("nCount_RNA","nFeature_RNA","percent.mito", "percent.ribo"),group.by = "orig.ident",ncol = 2)
+}  
 ```
 
 # Filter low or high expressed cells 
@@ -197,11 +214,14 @@ if(run){
 
 # visualize SingleR classification
 
-## TO DO, reahacer cluster por ontologia sólo en Bcells y Plasma Cells. 
-```{r,fig.height= 8,fig.width= 30}
-#DimPlot(seurat.merged.processed,group.by = "SingleR.main") +  
+```{r,fig.height= 8,fig.width= 8}
 
-(DimPlot(seurat.merged.processed,group.by = "SingleR.term")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
+fig0 = DimPlot(seurat.merged.processed,group.by = "SingleR.main")   
+ggsave("plots/fig0_singleR.pdf",plot = fig0,width = 7, height = 7)
+ggsave("plots/fig0_singleR.png",plot = fig0,width = 7, height = 7)
+ggsave("plots/fig0_singleR.tiff",plot = fig0,width = 7, height = 7)
+fig0
+#(DimPlot(seurat.merged.processed,group.by = "SingleR.term")) +  theme(legend.text=element_text(size=16)) #+ NoLegend())
 
 ```
 
@@ -296,7 +316,8 @@ markers$gene %in% (seurat.merged.processed%>%rownames())
 FeaturePlot(seurat.merged.processed,features = markers$gene,pt.size = 0.5,ncol = 3) 
 
 ```
-```{r}
+
+```{r,warning=F, collapse =T,message =F}
 cd79 <- scGate::gating_model(name = "cd79", signature = "Cd79a")
 cd19 <- scGate::gating_model(name = "cd19", signature = "Cd19")
 cd20 <- scGate::gating_model(name = "cd20", signature = "Ms4a1")
@@ -369,15 +390,14 @@ DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.b
 DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "iga" ) + theme(aspect.ratio = 1) + ggtitle("iga")
 DimPlot(testing.bcells, cols = c(list(Impure = "gray", Pure = "green")), group.by = "igd" ) + theme(aspect.ratio = 1) + ggtitle("igd")
 
-
-
-```
-
-```{r, fig.height= 4, fig.width= 5}
 sum(testing.bcells$cd79 == "Pure" | testing.bcells$cd20 == "Pure" | testing.bcells$cd19== "Pure")
 sum(testing.bcells$cd79 == "Pure" | testing.bcells$cd20 == "Pure" )
 
 
+```
+
+# Here We define our final gating model (panBcell2 which includes plasmatic resident cells)
+```{r, fig.height= 4, fig.width= 5}
 panBcell2 <- scGate::gating_model(name = "cd79", signature = "Cd79a")
 panBcell2 <- scGate::gating_model(panBcell2,name = "cd19", signature = "Cd19")
 panBcell2 <- scGate::gating_model(panBcell2, name = "cd20", signature = "Ms4a1")

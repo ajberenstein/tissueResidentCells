@@ -71,6 +71,7 @@ s.genes <- cc.genes$s.genes%>%hs.2.mm(.)
 g2m.genes <- cc.genes$g2m.genes%>%hs.2.mm(.)
 ```
 
+
 ```{r,warning=F, collapse =T,message =F, results='hide'}
 # WT
 set.seed(seed)
@@ -135,7 +136,7 @@ data.wt <- FindClusters(data.wt, resolution = 0.4)
 data.wt <- FindClusters(data.wt, resolution = 0.3)
 
 a <- DimPlot(data.wt,group.by = "SCT_snn_res.0.8",label = T)
-b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.3",label = T)
+b <- DimPlot(data.im ,group.by = "SCT_snn_res.0.4",label = T)
 
 a + b
 
@@ -169,13 +170,19 @@ clean.im <- data.im%>%subset(nCount_RNA<thr.im & nFeature_RNA<thr.im.feat)
 ```
 
 ```{r}
+clean.wt
+clean.im
+```
+
+
+```{r,warning=F, collapse =T,message =F}
 thr.im; thr.im.feat
 outl.im$SCT_snn_res.0.4%>%table()
 data.im$SCT_snn_res.0.4%>%table()
 ```
 
 
-```{r,eval =F,echo =F, results=F}
+```{r,eval =F,echo =F, results=F,collapse=T}
 thr.wt; thr.wt.feat
 outl.wt$SCT_snn_res.0.8%>%table()
 data.wt$SCT_snn_res.0.8%>%table()
@@ -198,13 +205,51 @@ aa + bb
 
 aa <- DimPlot(clean.wt ,group.by = "SCT_snn_res.0.8",label = T) 
 bb <- DimPlot(clean.im ,group.by = "SCT_snn_res.0.4",label = T) 
-fig3 <- aa + bb
-ggsave("plots/fig3_clustering_wt_im.pdf",plot = fig3,width = 8, height = 4)
-ggsave("plots/fig3_clustering_wt_im.png",plot = fig3,width = 8, height = 4)
-ggsave("plots/fig3_clustering_wt_im.tiff",plot = fig3,width = 8, height = 4)
-fig3
+fig3a <- aa 
+fig3b <- bb
+
+ggsave("plots/fig3a_clustering_wt_im.pdf",plot = fig3a,width = 4.5, height = 4) 
+ggsave("plots/fig3a_clustering_wt_im.png",plot = fig3a,width = 4.5, height = 4)
+ggsave("plots/fig3a_clustering_wt_im.tiff",plot = fig3a,width = 4.5, height = 4)
+
+ggsave("plots/fig3b_clustering_wt_im.pdf",plot = fig3b,width = 4.5, height = 4)
+ggsave("plots/fig3b_clustering_wt_im.png",plot = fig3b,width = 4.5, height = 4)
+ggsave("plots/fig3b_clustering_wt_im.tiff",plot = fig3b,width = 4.5, height = 4)
+
+aa + bb
 
 ```
+
+```{r}
+write.table(clean.im$SCT_snn_res.0.4,"~/Dropbox/Amezcua/tissue_resident_cells/reports/old_im_clusters_0_to_7.tsv",sep = "\t",quote = F,col.names = F)
+write.table(clean.wt$SCT_snn_res.0.8,"~/Dropbox/Amezcua/tissue_resident_cells/reports/old_wt_clusters_0_to_3.tsv",sep = "\t",quote = F,col.names = F)
+
+```
+
+
+```{r}
+original_clustes = read.table("~/Dropbox/Amezcua/tissue_resident_cells/reports/original_seurat_cluster.tsv")
+original_clustes$id <- original_clustes%>%rownames()
+im_clusters <- clean.im@meta.data%>%select("SCT_snn_res.0.4")
+im_clusters$id <- im_clusters%>%rownames()
+
+im_clusters = merge(im_clusters,original_clustes,by.x = "id",by.y = "id",all.x = T)
+relation_ids_im = table(im_clusters$SCT_snn_res.0.4,im_clusters$seurat_clusters)
+write.table(relation_ids_im,file = "~/Dropbox/Amezcua/tissue_resident_cells/reports/relation_cluster_ids_ims.tsv",sep = "\t",col.names = T,row.names =T,quote =F)
+
+
+wt_clusters <- clean.wt@meta.data%>%select("SCT_snn_res.0.8")
+wt_clusters$id <- wt_clusters%>%rownames()
+
+wt_clusters = merge(wt_clusters,original_clustes,by.x = "id",by.y = "id",all.x = T)
+
+relation_ids_wt <- table(wt_clusters$SCT_snn_res.0.8,wt_clusters$seurat_clusters)
+write.table(relation_ids_wt,file = "~/Dropbox/Amezcua/tissue_resident_cells/reports/relation_cluster_ids_wt.tsv",sep = "\t",col.names = T,row.names =T,quote =F)
+
+
+```
+
+
 ```{r}
 data.wt <- clean.wt
 data.im <- clean.im
@@ -244,7 +289,10 @@ write.table(discrim.wt,file = "~/repos/ajberenstein/tissueResidentCells/docs/mak
 ggsave(e,file = "~/repos/ajberenstein/tissueResidentCells/docs/heatmap_fdr005.im.png",height = 20,width = 10,dpi = 300)
 ggsave(e,file = "~/repos/ajberenstein/tissueResidentCells/docs/heatmap_fdr005.im.pdf",height = 20,width = 10,dpi = 300)
 write.table(discrim.im,file = "~/repos/ajberenstein/tissueResidentCells/docs/makers_fdr005.im.tsv",sep = "\t",quote =F,row.names =F)
+```
 
+
+```{r,eval = F}
 # 
 discrim.wt.down <- FindAllMarkers(data.wt, only.pos = FALSE, min.pct = 0.25, logfc.threshold = 0.15)
 discrim.wt.down <- discrim.wt.down%>%subset(p_val_adj < 0.05)
@@ -263,87 +311,9 @@ write.table(discrim.im.down,file = "~/repos/ajberenstein/tissueResidentCells/doc
 ```{r,eval=F,echo=F,results=F}
 discrim.im$cluster%>%table()
 discrim.im%>%head((discrim.im$cluster%>%table())["0"])
-discrim.im4025%>%subset(cluster==5)
+discrim.im%>%subset(cluster==5)
 ```
 
-```{r,eval=F,echo=F,results=F}
-# Control de daños sobre los clusters
-# WT
-scaled_genes <- data.wt@assays$SCT@scale.data%>%rownames()
-df <- data.frame()
-for(ncl in discrim.wt$cluster%>%unique()){
-
-  common_genes <- intersect( (discrim.wt2525%>%subset(cluster ==ncl))$gene,
-             (discrim.wt%>%subset(cluster ==ncl))$gene
-  )
-  common_genes <- intersect(common_genes,scaled_genes)
-  common_genes <- common_genes%>%paste(., collapse = "|")
-  
-  # Que genes diferencialment expresados perdió el nuevo cluster 
-  lossed_genes <- setdiff( (discrim.wt2525%>%subset(cluster ==ncl))$gene,
-             (discrim.wt%>%subset(cluster ==ncl))$gene
-  )
-  lossed_genes <- intersect(lossed_genes,scaled_genes)
-  lossed_genes <- lossed_genes%>%paste(., collapse = "|")
-  
-  
-  # Que tiene el nuevo cl3 que no tenía el de antes
-  new_genes <- setdiff( (discrim.wt%>%subset(cluster ==ncl))$gene,
-             (discrim.wt2525%>%subset(cluster ==ncl))$gene
-  )
-  new_genes <- intersect(new_genes,scaled_genes)
-  new_genes <- new_genes%>%paste(., collapse = "|")
-
-  df <- rbind(df,c(common_genes,lossed_genes,new_genes))
-}
-colnames(df) <- c("common","lossed","new")
-df$cluster <- discrim.wt$cluster%>%unique()
-write.table(df,"~/Dropbox/enrichment_diff_wt.tsv",quote =F,row.names =F,sep = "\t")
-
-
-
-## IM
-scaled_genes <- data.im@assays$SCT@scale.data%>%rownames()
-df <- data.frame()
-for(ncl in discrim.im$cluster%>%unique()){
-
-  common_genes <- intersect( (discrim.im4025%>%subset(cluster ==ncl))$gene,
-             (discrim.im%>%subset(cluster ==ncl))$gene
-  )
-
-  common_genes <- intersect(common_genes,scaled_genes)
-  common_genes <- common_genes%>%paste(., collapse = "|")
-  
-  # Que genes diferencialment expresados perdió el nuevo cluster 
-  lossed_genes <- setdiff( (discrim.im4025%>%subset(cluster ==ncl))$gene,
-             (discrim.im%>%subset(cluster ==ncl))$gene
-  )
-  lossed_genes <- intersect(lossed_genes,scaled_genes)
-  lossed_genes <- lossed_genes%>%paste(., collapse = "|")
-  
-  
-  # Que tiene el nuevo cl3 que no tenía el de antes
-  new_genes <- setdiff( (discrim.im%>%subset(cluster ==ncl))$gene,
-             (discrim.im4025%>%subset(cluster ==ncl))$gene
-  )
-  new_genes <- intersect(new_genes,scaled_genes)
-  new_genes <- new_genes%>%paste(., collapse = "|")
-
-  df <- rbind(df,c(common_genes,lossed_genes,new_genes))
-}
-colnames(df) <- c("common","lossed","new")
-df$cluster <- discrim.im$cluster%>%unique()
-df
-write.table(df,"~/Dropbox/enrichment_diff_im.tsv",quote =F,row.names =F,sep = "\t")
-
-
-
-
-```
-
-```{r}
-sum(data.im$nCount_RNA>1500)
-```
 
 # DimPlot using Heatmap genes
 
@@ -392,7 +362,7 @@ FeaturePlot(data.wt,features = features1, ncol = 5)
 ```
 
 IM dataset
-```{r,fig.height=8,fig.width=10,warning=F, collapse =T,message =F}
+```{r,fig.height=15,fig.width=15,warning=F, collapse =T,message =F}
 FeaturePlot(data.im,features = features1, ncol = 5)
 ```
 
